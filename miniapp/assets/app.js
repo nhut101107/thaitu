@@ -1,7 +1,7 @@
 import {api} from "./api.js";
 import {state, subscribe, update} from "./state.js";
 import {bottomNav, header, toast} from "./components.js";
-import {accountView, addToCart, homeView, openCart, openOrder, openProduct, ordersView, storeView, toolsView} from "./views.js";
+import {accountView, addToCart, claimFreeCookie, homeView, openCart, openDeposit, openGiftcode, openHelp, openNftoken, openOrder, openProduct, openSupport, openTvLogin, ordersView, storeView, toolsView} from "./views.js";
 
 const tg = window.Telegram?.WebApp;
 const app = document.querySelector("#app");
@@ -37,17 +37,16 @@ async function loadOrders() {
   update({orders: result.items});
 }
 
+async function loadTools() {
+  const result = await api.toolsStatus();
+  update({tools: result});
+}
+
 async function navigate(route) {
   update({route});
   window.scrollTo({top: 0, behavior: "smooth"});
   if (route === "orders") await loadOrders();
-}
-
-function sendBotAction(action) {
-  if (!tg?.initData) return toast("Hãy mở Mini App bên trong Telegram", "error");
-  tg.sendData(JSON.stringify({type: "open_bot_action", action}));
-  tg.HapticFeedback?.impactOccurred("light");
-  tg.close();
+  if (route === "tools") await loadTools();
 }
 
 function bindEvents() {
@@ -55,10 +54,11 @@ function bindEvents() {
   document.querySelectorAll("[data-product]").forEach((node) => node.onclick = (event) => { if (!event.target.closest("[data-add]")) openProduct(node.dataset.product); });
   document.querySelectorAll("[data-add]").forEach((node) => node.onclick = (event) => { event.stopPropagation(); addToCart(node.dataset.add); });
   document.querySelectorAll("[data-order]").forEach((node) => node.onclick = () => openOrder(node.dataset.order));
-  document.querySelectorAll("[data-bot-action]").forEach((node) => node.onclick = () => sendBotAction(node.dataset.botAction));
+  const toolActions = {tv: openTvLogin, "plan-token": () => openNftoken("plan"), "vip-token": () => openNftoken("vip"), "free-cookie": claimFreeCookie, giftcode: openGiftcode, deposit: openDeposit, support: openSupport, help: openHelp};
+  document.querySelectorAll("[data-tool]").forEach((node) => node.onclick = () => toolActions[node.dataset.tool]?.());
   document.querySelectorAll("[data-action='cart']").forEach((node) => node.onclick = openCart);
-  document.querySelectorAll("[data-action='deposit']").forEach((node) => node.onclick = () => sendBotAction("deposit_main"));
-  document.querySelectorAll("[data-action='support']").forEach((node) => node.onclick = () => sendBotAction("report_error"));
+  document.querySelectorAll("[data-action='deposit']").forEach((node) => node.onclick = openDeposit);
+  document.querySelectorAll("[data-action='support']").forEach((node) => node.onclick = openSupport);
   document.querySelectorAll("[data-action='search']").forEach((node) => node.onclick = () => navigate("store").then(() => document.querySelector("#product-search")?.focus()));
   document.querySelectorAll("[data-action='reload-orders']").forEach((node) => node.onclick = loadOrders);
   document.querySelectorAll("[data-category]").forEach((node) => node.onclick = () => { state.category = node.dataset.category; loadProducts(); });

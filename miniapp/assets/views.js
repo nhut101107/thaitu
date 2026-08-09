@@ -45,13 +45,19 @@ export function ordersView(loading = false) {
 }
 
 export function toolsView() {
+  const quota = state.tools?.quota || state.bootstrap.quota || {};
+  const stock = state.tools?.stock || {premium: state.bootstrap.inventory.premiumCookies, free: 0};
   const tools = [
-    ["📺", "Đăng nhập Netflix TV", "Nhập mã TV qua bot", "menu_tv_log", true],
-    ["⚡", "Tạo NFToken", "Lấy Cookie sống và link nhanh", "menu_chk", true],
-    ["🎁", "Cookie miễn phí", "Nhận cookie theo hạn mức gói", "menu_freecookie", true],
-    ["🔐", "Tạo mã 2FA", "Source bot hiện chưa có TOTP", "", false],
+    ["📺", "Đăng nhập Netflix TV", "Nhập mã TV và xử lý ngay trong app", "tv"],
+    ["⚡", "Tạo NFToken theo gói", `${quota.tokensUsed || 0}/${quota.tokensMax || 0} lượt hôm nay`, "plan-token"],
+    ["🍪", "Rút Cookie VIP", `${quota.credits || 0} lượt đã mua`, "vip-token"],
+    ["🎁", "Cookie miễn phí", `${quota.freeCookiesUsed || 0}/${quota.freeCookiesMax || 0} lượt hôm nay`, "free-cookie"],
+    ["🎟", "Nhập mã quà tặng", "Cộng số dư trực tiếp", "giftcode"],
+    ["💸", "Nạp tiền", "Tạo QR và yêu cầu duyệt", "deposit"],
+    ["🛟", "Báo lỗi & hỗ trợ", "Gửi thẳng yêu cầu đến Admin", "support"],
+    ["📚", "Hướng dẫn", "Xem cách sử dụng các chức năng", "help"],
   ];
-  return `<div class="page"><div class="eyebrow">NFTOKEN TOOLBOX</div><div class="store-heading"><h1>Tiện ích nhanh</h1><span>BOT NATIVE</span></div><div class="privacy-banner">${icon("shield")}<div><b>Kết nối chức năng thật</b><small>Tác vụ được chuyển về bot, không tạo chức năng giả.</small></div></div><div class="tool-grid">${tools.map(([glyph,name,desc,action,enabled]) => `<button ${enabled ? `data-bot-action="${action}"` : "disabled"}><i>${glyph}</i><b>${name}</b><small>${desc}</small>${!enabled ? "<em>Chưa khả dụng</em>" : ""}</button>`).join("")}</div><section class="panel"><h2>Cách sử dụng</h2><p>Chọn tiện ích để Mini App gửi yêu cầu an toàn về cuộc trò chuyện. Bot sẽ hiển thị luồng chức năng tương ứng mà không làm mất menu hiện tại.</p></section></div>`;
+  return `<div class="page"><div class="eyebrow">NFTOKEN TOOLBOX</div><div class="store-heading"><h1>Tiện ích nhanh</h1><span>TRỰC TIẾP</span></div><div class="privacy-banner">${icon("shield")}<div><b>Không rời Mini App</b><small>Mọi tác vụ bên dưới được xác thực và xử lý trực tiếp.</small></div></div><div class="tool-stock"><span>Kho Premium <b>${stock.premium || 0}</b></span><span>Kho Free <b>${stock.free || 0}</b></span></div><div class="tool-grid">${tools.map(([glyph,name,desc,action]) => `<button data-tool="${action}"><i>${glyph}</i><b>${name}</b><small>${desc}</small></button>`).join("")}</div></div>`;
 }
 
 export function accountView() {
@@ -59,7 +65,7 @@ export function accountView() {
   const initials = escapeHtml((user.firstName || "N")[0]);
   const avatar = user.photoUrl ? `<img src="${escapeHtml(user.photoUrl)}" alt="">` : initials;
   return `<div class="page account-page"><div class="profile-hero"><div class="profile-avatar">${avatar}</div><h1>${escapeHtml(`${user.firstName} ${user.lastName}`.trim())}</h1><p>${user.username ? `@${escapeHtml(user.username)}` : "Chưa đặt username"}</p><span>♕ ${escapeHtml(user.plan)}</span></div>
-    <section class="panel account-list"><header><h2>Tài khoản</h2><small>An toàn & bảo mật</small></header><button><i>${icon("wallet")}</i><span><b>Số dư ví</b><small>${formatMoney(user.balance)}</small></span></button><button data-route="orders"><i>${icon("orders")}</i><span><b>Lịch sử đơn hàng</b><small>${user.orderCount} đơn đã mua</small></span>${icon("arrow")}</button><button data-action="support"><i>${icon("account")}</i><span><b>Hỗ trợ trực tiếp</b><small>${escapeHtml(state.bootstrap.support)}</small></span>${icon("arrow")}</button></section>
+    <section class="panel account-list"><header><h2>Tài khoản</h2><small>An toàn & bảo mật</small></header><button data-action="deposit"><i>${icon("wallet")}</i><span><b>Số dư ví</b><small>${formatMoney(user.balance)} · Chạm để nạp</small></span>${icon("arrow")}</button><button data-route="orders"><i>${icon("orders")}</i><span><b>Lịch sử đơn hàng</b><small>${user.orderCount} đơn đã mua</small></span>${icon("arrow")}</button><button data-action="support"><i>${icon("account")}</i><span><b>Hỗ trợ trực tiếp</b><small>Gửi yêu cầu ngay trong app</small></span>${icon("arrow")}</button></section>
     <section class="panel commitments"><header><h2>Chính sách & cam kết</h2></header><p>♢ <span><b>Minh bạch gói dịch vụ</b><small>Thông tin lượt và giá được đọc trực tiếp từ hệ thống.</small></span></p><p>⚡ <span><b>Giao lượt tức thì</b><small>Lượt Cookie được cộng sau khi giao dịch thành công.</small></span></p><p>▣ <span><b>Chỉ xử lý sau thanh toán</b><small>Backend kiểm tra lại giá và số dư trong một transaction.</small></span></p></section>
     <section class="panel membership"><h2>Hạng ${escapeHtml(user.plan)}</h2><p>Telegram ID: ${user.id}</p><div><i style="width:${Math.min(100, user.spent / 10000)}%"></i></div></section><footer class="version">NFTOKEN PRO MINI APP · VERSION 1.0</footer></div>`;
 }
@@ -98,4 +104,89 @@ function confirmCheckout(closeCart) {
 
 export function openOrder(id) {
   api.order(id).then(({item}) => modal(`<div class="confirm-icon">${icon("orders")}</div><div class="eyebrow">ĐƠN #NFT${String(item.id).padStart(6,"0")}</div><h2>${escapeHtml(item.plan_name)}</h2><dl><div><dt>Ngày mua</dt><dd>${escapeHtml(item.date)}</dd></div><div><dt>Số lượng</dt><dd>${item.quantity || 1}</dd></div><div><dt>Thanh toán</dt><dd>${formatMoney(item.price)}</dd></div><div><dt>Trạng thái</dt><dd>${escapeHtml(item.status)}</dd></div><div><dt>Bảo hành</dt><dd>${item.warranty_until ? escapeHtml(item.warranty_until) : "Không áp dụng"}</dd></div></dl>`)).catch((error) => toast(error.message,"error"));
+}
+
+function syncQuota(quota) {
+  if (!quota) return;
+  state.tools = {...(state.tools || {}), quota};
+  state.bootstrap.quota = quota;
+  state.bootstrap.user.credits = quota.credits;
+}
+
+function busyButton(button, text = "Đang xử lý...") {
+  const old = button.textContent;
+  button.disabled = true;
+  button.textContent = text;
+  return () => { button.disabled = false; button.textContent = old; };
+}
+
+function accountSummary(account = {}) {
+  return `<dl><div><dt>Email</dt><dd>${escapeHtml(account.email || "Không rõ")}</dd></div><div><dt>Gói</dt><dd>${escapeHtml(account.plan || "Không rõ")}</dd></div><div><dt>Quốc gia</dt><dd>${escapeHtml(account.country || "Không rõ")}</dd></div><div><dt>Trạng thái</dt><dd>${escapeHtml(account.status || "Không rõ")}</dd></div></dl>`;
+}
+
+export function openNftoken(mode = "plan") {
+  const vip = mode === "vip";
+  modal(`<div class="confirm-icon">${vip ? "🍪" : "⚡"}</div><h2>${vip ? "Rút Cookie VIP" : "Tạo NFToken theo gói"}</h2><p>${vip ? "Lượt đã mua sẽ chỉ bị trừ khi tạo thành công." : "Sử dụng hạn mức NFToken hằng ngày của gói hiện tại."}</p>${vip ? '<label class="field">Số lượng<input id="tool-quantity" type="number" min="1" max="5" value="1"></label>' : ""}<button class="button wide" data-run-nftoken>Bắt đầu xử lý</button>`, {onOpen(root, close) {
+    root.querySelector("[data-run-nftoken]").onclick = async (event) => {
+      const done = busyButton(event.currentTarget); const quantity = Number(root.querySelector("#tool-quantity")?.value || 1);
+      try {
+        const result = await api.nftoken(mode, quantity); syncQuota(result.quota); close();
+        modal(`<div class="confirm-icon">✓</div><h2>Tạo thành công ${result.items.length} NFToken</h2>${result.items.map((item, index) => `<article class="token-result"><b>Tài khoản ${index + 1}</b>${accountSummary(item.account)}<a class="button wide" href="${escapeHtml(item.link)}" target="_blank" rel="noopener">Mở Netflix</a><button class="button secondary wide" data-copy-link="${escapeHtml(item.link)}">Sao chép link</button></article>`).join("")}`, {onOpen(resultRoot) { resultRoot.querySelectorAll("[data-copy-link]").forEach((button) => button.onclick = () => navigator.clipboard.writeText(button.dataset.copyLink).then(() => toast("Đã sao chép link"))); }});
+      } catch (error) { toast(error.message, "error"); done(); }
+    };
+  }});
+}
+
+export function claimFreeCookie() {
+  modal(`<div class="confirm-icon">🎁</div><h2>Cookie miễn phí</h2><p>Cookie được lấy theo đúng hạn mức gói của bạn.</p><button class="button wide" data-claim-free>Nhận Cookie ngay</button>`, {onOpen(root, close) {
+    root.querySelector("[data-claim-free]").onclick = async (event) => {
+      const done = busyButton(event.currentTarget);
+      try { const result = await api.freeCookie(); syncQuota(result.quota); close(); modal(`<div class="confirm-icon">✓</div><h2>Cookie của bạn</h2><textarea class="result-text" readonly>${escapeHtml(result.cookie)}</textarea><button class="button wide" data-copy-cookie>Sao chép Cookie</button>`, {onOpen(resultRoot) { resultRoot.querySelector("[data-copy-cookie]").onclick = () => navigator.clipboard.writeText(result.cookie).then(() => toast("Đã sao chép Cookie")); }}); }
+      catch (error) { toast(error.message, "error"); done(); }
+    };
+  }});
+}
+
+export function openTvLogin() {
+  modal(`<div class="confirm-icon">📺</div><h2>Đăng nhập Netflix TV</h2><p>Mở Netflix trên TV, chọn đăng nhập từ trang web rồi nhập mã đang hiển thị.</p><label class="field">Mã TV<input id="tv-code" inputmode="text" maxlength="12" placeholder="Ví dụ: 12345678"></label><button class="button wide" data-run-tv>Kết nối TV</button>`, {onOpen(root, close) {
+    root.querySelector("[data-run-tv]").onclick = async (event) => {
+      const code = root.querySelector("#tv-code").value.trim(); const done = busyButton(event.currentTarget, "Đang kết nối, vui lòng chờ...");
+      try { const result = await api.tvLogin(code); close(); modal(`<div class="confirm-icon">✓</div><h2>${escapeHtml(result.message)}</h2>${accountSummary(result.account)}`); }
+      catch (error) { toast(error.message, "error"); done(); }
+    };
+  }});
+}
+
+export function openGiftcode() {
+  modal(`<div class="confirm-icon">🎟</div><h2>Nhập mã quà tặng</h2><label class="field">Mã của bạn<input id="gift-code" maxlength="50" autocomplete="off" placeholder="SALE50K"></label><button class="button wide" data-redeem-code>Nhận quà</button>`, {onOpen(root, close) {
+    root.querySelector("[data-redeem-code]").onclick = async (event) => {
+      const done = busyButton(event.currentTarget);
+      try { const result = await api.giftcode(root.querySelector("#gift-code").value); state.bootstrap.user.balance += result.amount; close(); toast(`Đã cộng ${formatMoney(result.amount)}`); update({bootstrap: state.bootstrap}); }
+      catch (error) { toast(error.message, "error"); done(); }
+    };
+  }});
+}
+
+export function openDeposit() {
+  modal(`<div class="confirm-icon">💸</div><h2>Nạp tiền</h2><label class="field">Số tiền<input id="deposit-amount" type="number" min="10000" max="100000000" step="10000" value="50000"></label><button class="button wide" data-create-deposit>Tạo yêu cầu nạp</button>`, {onOpen(root, close) {
+    root.querySelector("[data-create-deposit]").onclick = async (event) => {
+      const done = busyButton(event.currentTarget);
+      try { const result = await api.deposit(Number(root.querySelector("#deposit-amount").value)); close(); modal(`<div class="eyebrow">GIAO DỊCH #${result.transactionId}</div><h2>Chuyển khoản ${formatMoney(result.amount)}</h2>${result.qrUrl ? `<img class="deposit-qr" src="${escapeHtml(result.qrUrl)}" alt="QR chuyển khoản">` : '<div class="privacy-banner">Admin chưa cấu hình QR ngân hàng. Hãy dùng nội dung bên dưới khi chuyển khoản.</div>'}<p>Nội dung chuyển khoản</p><div class="copy-value"><code>${escapeHtml(result.transferNote)}</code><button data-copy-note>${icon("copy")}</button></div><p class="muted">Yêu cầu đã gửi đến Admin để duyệt.</p>`, {onOpen(resultRoot) { resultRoot.querySelector("[data-copy-note]").onclick = () => navigator.clipboard.writeText(result.transferNote).then(() => toast("Đã sao chép nội dung")); }}); }
+      catch (error) { toast(error.message, "error"); done(); }
+    };
+  }});
+}
+
+export function openSupport() {
+  modal(`<div class="confirm-icon">🛟</div><h2>Báo lỗi & hỗ trợ</h2><label class="field">Mô tả vấn đề<textarea id="support-message" maxlength="1500" placeholder="Hãy mô tả chi tiết lỗi bạn gặp..."></textarea></label><button class="button wide" data-send-support>Gửi đến Admin</button>`, {onOpen(root, close) {
+    root.querySelector("[data-send-support]").onclick = async (event) => {
+      const done = busyButton(event.currentTarget);
+      try { const result = await api.support(root.querySelector("#support-message").value); close(); toast(`Đã gửi yêu cầu #${result.ticketId}`); }
+      catch (error) { toast(error.message, "error"); done(); }
+    };
+  }});
+}
+
+export function openHelp() {
+  modal(`<div class="confirm-icon">📚</div><h2>Hướng dẫn sử dụng</h2><div class="help-list"><p><b>NFToken theo gói</b><small>Dùng hạn mức hằng ngày của gói thành viên.</small></p><p><b>Cookie VIP</b><small>Dùng lượt đã mua trong cửa hàng; chỉ trừ khi thành công.</small></p><p><b>Đăng nhập TV</b><small>Mã TV có thời hạn ngắn, hãy nhập ngay khi TV hiển thị.</small></p><p><b>Nạp tiền</b><small>Chuyển đúng số tiền và nội dung; Admin duyệt trực tiếp từ Telegram.</small></p></div>`);
 }

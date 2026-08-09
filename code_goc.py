@@ -18,7 +18,7 @@ from requests.adapters import HTTPAdapter
 from urllib.parse import quote
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-DATABASE_PATH = os.path.join(APP_DIR, 'bot_database.db')
+DATABASE_PATH = os.getenv('BOT_DATABASE_PATH', os.path.join(APP_DIR, 'bot_database.db'))
 TOKEN_FILE = os.path.join(APP_DIR, 'tokenbot.txt')
 ADMIN_ID = int(os.getenv('TELEGRAM_ADMIN_ID', '5992662564'))
 MINIAPP_URL = os.getenv('TELEGRAM_MINIAPP_URL', '').strip()

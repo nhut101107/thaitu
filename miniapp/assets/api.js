@@ -34,4 +34,11 @@ export const api = {
   orders: () => request("/api/orders"),
   order: (id) => request(`/api/orders/${id}`),
   transactions: () => request("/api/transactions"),
+  toolsStatus: () => request("/api/tools/status"),
+  freeCookie: () => request("/api/tools/free-cookie", {method: "POST", body: "{}"}),
+  nftoken: (mode, quantity = 1) => request("/api/tools/nftoken", {method: "POST", body: JSON.stringify({mode, quantity})}),
+  tvLogin: (code) => request("/api/tools/tv-login", {method: "POST", body: JSON.stringify({code})}),
+  giftcode: (code) => request("/api/giftcode", {method: "POST", body: JSON.stringify({code})}),
+  deposit: (amount) => request("/api/deposits", {method: "POST", body: JSON.stringify({amount})}),
+  support: (message) => request("/api/support", {method: "POST", body: JSON.stringify({message})}),
 };

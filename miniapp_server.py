@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import html
 import json
 import os
 import sqlite3
@@ -7,7 +8,9 @@ import threading
 import time
 from datetime import datetime, timedelta
 from functools import wraps
-from urllib.parse import parse_qsl
+from urllib.error import URLError
+from urllib.parse import parse_qsl, quote
+from urllib.request import Request, urlopen
 
 from flask import Flask, g, jsonify, request, send_from_directory
 
@@ -19,6 +22,8 @@ AUTH_MAX_AGE = int(os.getenv("MINIAPP_AUTH_MAX_AGE", "3600"))
 PAGE_SIZE = 20
 CHECKOUT_ATTEMPTS = {}
 CHECKOUT_LOCK = threading.Lock()
+TOOL_ATTEMPTS = {}
+TOOL_LOCK = threading.Lock()
 MIGRATION_LOCK = threading.Lock()
 MIGRATED_PATHS = set()
 
@@ -73,6 +78,24 @@ def migrate():
             id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT,
             is_used INTEGER DEFAULT 0
         );
+        CREATE TABLE IF NOT EXISTS free_cookies(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT,
+            is_used INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS plans(
+            name TEXT PRIMARY KEY, tokens_max INTEGER,
+            cookies_max INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS usage(
+            user_id INTEGER, date TEXT, tokens_used INTEGER DEFAULT 0,
+            free_cookies_used INTEGER DEFAULT 0,
+            PRIMARY KEY(user_id, date)
+        );
+        CREATE TABLE IF NOT EXISTS discount_codes(
+            code TEXT PRIMARY KEY, amount INTEGER, uses INTEGER
+        );
+        INSERT OR IGNORE INTO plans(name, tokens_max, cookies_max)
+            VALUES('FREE', 0, 0);
         """
     )
     store_columns = column_names(connection, "store")
@@ -121,12 +144,21 @@ def migrate():
             created_at TEXT NOT NULL,
             UNIQUE(user_id, idempotency_key)
         );
+        CREATE TABLE IF NOT EXISTS miniapp_support (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            message TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'OPEN',
+            created_at TEXT NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS idx_purchase_history_user_date
             ON purchase_history(user_id, date DESC);
         CREATE INDEX IF NOT EXISTS idx_transactions_user_id
             ON transactions(user_id, id DESC);
         CREATE INDEX IF NOT EXISTS idx_store_active_category
             ON store(active, category);
+        CREATE INDEX IF NOT EXISTS idx_miniapp_support_user
+            ON miniapp_support(user_id, id DESC);
         """
     )
     connection.commit()
@@ -181,6 +213,14 @@ def authenticated(handler):
             )
         except ValueError as error:
             return jsonify({"ok": False, "error": str(error)}), 401
+        connection = db()
+        user_id = ensure_user(connection, g.telegram_user)
+        banned = connection.execute(
+            "SELECT is_banned FROM users WHERE user_id=?", (user_id,)
+        ).fetchone()
+        connection.commit()
+        if banned and banned[0]:
+            return jsonify({"ok": False, "error": "Tài khoản đã bị khóa"}), 403
         return handler(*args, **kwargs)
 
     return wrapped
@@ -204,6 +244,163 @@ def checkout_rate_limited(user_id):
             return True
         attempts.append(now)
         CHECKOUT_ATTEMPTS[user_id] = attempts
+        return False
+
+
+def tool_rate_limited(user_id, limit=6, window=30):
+    now = time.monotonic()
+    with TOOL_LOCK:
+        attempts = [stamp for stamp in TOOL_ATTEMPTS.get(user_id, []) if now - stamp < window]
+        if len(attempts) >= limit:
+            TOOL_ATTEMPTS[user_id] = attempts
+            return True
+        attempts.append(now)
+        TOOL_ATTEMPTS[user_id] = attempts
+        return False
+
+
+def telegram_notify(text, reply_markup=None):
+    """Best-effort admin notification; the user flow must not depend on Telegram delivery."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    admin_id = os.getenv("TELEGRAM_ADMIN_ID", "").strip()
+    if not token or not admin_id:
+        return False
+
+
+class ToolError(Exception):
+    def __init__(self, message, status=400):
+        super().__init__(message)
+        self.status = status
+
+
+def reserve_cookie(connection):
+    connection.execute("BEGIN IMMEDIATE")
+    row = connection.execute(
+        "SELECT id, data FROM premium_cookies WHERE is_used=0 ORDER BY RANDOM() LIMIT 1"
+    ).fetchone()
+    if not row:
+        connection.rollback()
+        raise ToolError("Kho Cookie Premium đang trống", 409)
+    updated = connection.execute(
+        "UPDATE premium_cookies SET is_used=1 WHERE id=? AND is_used=0", (row["id"],)
+    )
+    if updated.rowcount != 1:
+        connection.rollback()
+        raise ToolError("Kho vừa thay đổi, vui lòng thử lại", 409)
+    connection.commit()
+    return row["id"], row["data"]
+
+
+def reserve_nftoken_request(connection, user_id, mode):
+    today = datetime.now().strftime("%Y-%m-%d")
+    connection.execute("BEGIN IMMEDIATE")
+    ensure_user(connection, g.telegram_user)
+    if mode == "vip":
+        updated = connection.execute(
+            "UPDATE users SET credits=credits-1 WHERE user_id=? AND credits>0", (user_id,)
+        )
+        if updated.rowcount != 1:
+            connection.rollback()
+            raise ToolError("Bạn đã hết lượt Cookie VIP", 409)
+    else:
+        plan_name = connection.execute(
+            "SELECT plan_name FROM users WHERE user_id=?", (user_id,)
+        ).fetchone()[0]
+        plan = connection.execute(
+            "SELECT tokens_max FROM plans WHERE name=?", (plan_name,)
+        ).fetchone()
+        tokens_max = plan[0] if plan else 0
+        connection.execute(
+            "INSERT OR IGNORE INTO usage(user_id,date) VALUES(?,?)", (user_id, today)
+        )
+        updated = connection.execute(
+            """UPDATE usage SET tokens_used=tokens_used+1
+               WHERE user_id=? AND date=? AND tokens_used<?""",
+            (user_id, today, tokens_max),
+        )
+        if updated.rowcount != 1:
+            connection.rollback()
+            raise ToolError("Bạn đã hết lượt tạo NFToken hôm nay", 409)
+    row = connection.execute(
+        "SELECT id, data FROM premium_cookies WHERE is_used=0 ORDER BY RANDOM() LIMIT 1"
+    ).fetchone()
+    if not row:
+        connection.rollback()
+        raise ToolError("Kho Cookie Premium đang trống", 409)
+    connection.execute("UPDATE premium_cookies SET is_used=1 WHERE id=?", (row["id"],))
+    connection.commit()
+    return row["id"], row["data"]
+
+
+def refund_nftoken_request(connection, user_id, mode):
+    today = datetime.now().strftime("%Y-%m-%d")
+    connection.execute("BEGIN IMMEDIATE")
+    if mode == "vip":
+        connection.execute("UPDATE users SET credits=credits+1 WHERE user_id=?", (user_id,))
+    else:
+        connection.execute(
+            """UPDATE usage SET tokens_used=MAX(0,tokens_used-1)
+               WHERE user_id=? AND date=?""",
+            (user_id, today),
+        )
+    connection.commit()
+
+
+def release_cookie(connection, cookie_id, delete=False):
+    connection.execute("BEGIN IMMEDIATE")
+    if delete:
+        connection.execute("DELETE FROM premium_cookies WHERE id=?", (cookie_id,))
+    else:
+        connection.execute("UPDATE premium_cookies SET is_used=0 WHERE id=?", (cookie_id,))
+    connection.commit()
+
+
+def run_cookie_check(cookie_data):
+    """Lazy import keeps normal Mini App startup light and makes the checker testable."""
+    from code_goc import checker
+
+    parsed = checker.extract_cookies_from_text(cookie_data)
+    if not parsed:
+        return False, None, "Cookie sai định dạng", {}, None
+    cookies = parsed[0]
+    success, token, error, account = checker.check_cookie(cookies)
+    netscape = checker.build_netscape_format(cookies) if success and token else None
+    return success, token, error, account, netscape
+
+
+def run_tv_login(cookie_data, tv_code):
+    from code_goc import checker, process_tv_login
+
+    parsed = checker.extract_cookies_from_text(cookie_data)
+    if not parsed:
+        return False, "Cookie sai định dạng", {}
+    return process_tv_login(parsed[0], tv_code)
+
+
+def public_account(account):
+    return {
+        "name": account.get("account_name", "Không rõ"),
+        "email": account.get("email_masked", "Không rõ"),
+        "plan": account.get("plan", "Không rõ"),
+        "country": account.get("country", "Không rõ"),
+        "status": account.get("membership_status", "Không rõ"),
+        "quality": account.get("video_quality", "Không rõ"),
+        "profiles": account.get("profile_count", "Không rõ"),
+    }
+    payload = {"chat_id": admin_id, "text": text, "parse_mode": "HTML"}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    try:
+        telegram_request = Request(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(telegram_request, timeout=10) as response:
+            return 200 <= response.status < 300
+    except (OSError, URLError):
+        app.logger.warning("Unable to notify Telegram admin", exc_info=True)
         return False
 
 
@@ -248,6 +445,8 @@ def security_headers(response):
         "style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; "
         "connect-src 'self'; frame-ancestors https://web.telegram.org https://*.telegram.org"
     )
+    if request.path == "/" or request.path.startswith("/assets/"):
+        response.headers["Cache-Control"] = "no-store"
     return response
 
 
@@ -289,6 +488,7 @@ def bootstrap():
     stock = connection.execute(
         "SELECT COUNT(*) FROM premium_cookies WHERE is_used=0"
     ).fetchone()[0]
+    quota = quota_payload(connection, user_id)
     return jsonify(
         {
             "ok": True,
@@ -307,9 +507,33 @@ def bootstrap():
                 "cartCount": cart_count,
             },
             "inventory": {"premiumCookies": stock},
+            "quota": quota,
             "support": os.getenv("SUPPORT_USERNAME", "@mnhutdznecon"),
         }
     )
+
+
+def quota_payload(connection, user_id):
+    today = datetime.now().strftime("%Y-%m-%d")
+    user = connection.execute(
+        "SELECT plan_name, credits FROM users WHERE user_id=?", (user_id,)
+    ).fetchone()
+    plan_name = user["plan_name"] if user else "FREE"
+    plan = connection.execute(
+        "SELECT tokens_max, cookies_max FROM plans WHERE name=?", (plan_name,)
+    ).fetchone()
+    usage = connection.execute(
+        "SELECT tokens_used, free_cookies_used FROM usage WHERE user_id=? AND date=?",
+        (user_id, today),
+    ).fetchone()
+    return {
+        "plan": plan_name,
+        "credits": user["credits"] if user else 0,
+        "tokensUsed": usage["tokens_used"] if usage else 0,
+        "tokensMax": plan["tokens_max"] if plan else 0,
+        "freeCookiesUsed": usage["free_cookies_used"] if usage else 0,
+        "freeCookiesMax": plan["cookies_max"] if plan else 0,
+    }
 
 
 @app.get("/api/products")
@@ -527,6 +751,250 @@ def transactions():
         (int(g.telegram_user["id"]),),
     ).fetchall()
     return jsonify({"ok": True, "items": [dict(row) for row in rows]})
+
+
+@app.get("/api/tools/status")
+@authenticated
+def tools_status():
+    connection = db()
+    user_id = int(g.telegram_user["id"])
+    premium = connection.execute(
+        "SELECT COUNT(*) FROM premium_cookies WHERE is_used=0"
+    ).fetchone()[0]
+    free = connection.execute(
+        "SELECT COUNT(*) FROM free_cookies WHERE is_used=0"
+    ).fetchone()[0]
+    return jsonify(
+        {"ok": True, "quota": quota_payload(connection, user_id), "stock": {"premium": premium, "free": free}}
+    )
+
+
+@app.post("/api/tools/free-cookie")
+@authenticated
+def free_cookie():
+    connection = db()
+    user_id = int(g.telegram_user["id"])
+    if tool_rate_limited(user_id):
+        return jsonify({"ok": False, "error": "Bạn thao tác quá nhanh"}), 429
+    today = datetime.now().strftime("%Y-%m-%d")
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        plan_name = connection.execute(
+            "SELECT plan_name FROM users WHERE user_id=?", (user_id,)
+        ).fetchone()[0]
+        plan = connection.execute(
+            "SELECT cookies_max FROM plans WHERE name=?", (plan_name,)
+        ).fetchone()
+        cookies_max = plan[0] if plan else 0
+        connection.execute(
+            "INSERT OR IGNORE INTO usage(user_id,date) VALUES(?,?)", (user_id, today)
+        )
+        usage = connection.execute(
+            "SELECT free_cookies_used FROM usage WHERE user_id=? AND date=?",
+            (user_id, today),
+        ).fetchone()[0]
+        if usage >= cookies_max:
+            connection.rollback()
+            return jsonify({"ok": False, "error": "Bạn đã hết lượt Cookie miễn phí hôm nay"}), 409
+        cookie = connection.execute(
+            "SELECT id,data FROM free_cookies WHERE is_used=0 ORDER BY id LIMIT 1"
+        ).fetchone()
+        if not cookie:
+            connection.rollback()
+            return jsonify({"ok": False, "error": "Kho Cookie miễn phí đang trống"}), 409
+        connection.execute("UPDATE free_cookies SET is_used=1 WHERE id=?", (cookie["id"],))
+        connection.execute(
+            "UPDATE usage SET free_cookies_used=free_cookies_used+1 WHERE user_id=? AND date=?",
+            (user_id, today),
+        )
+        connection.commit()
+        return jsonify(
+            {"ok": True, "cookie": cookie["data"], "quota": quota_payload(connection, user_id)}
+        )
+    except Exception:
+        connection.rollback()
+        app.logger.exception("Free cookie failed for user_id=%s", user_id)
+        return jsonify({"ok": False, "error": "Không thể nhận Cookie lúc này"}), 500
+
+
+def generate_one_nftoken(connection, user_id, mode):
+    cookie_id, cookie_data = reserve_nftoken_request(connection, user_id, mode)
+    last_error = "Không tìm thấy Cookie hoạt động"
+    for attempt in range(5):
+        try:
+            success, token, error, account, netscape = run_cookie_check(cookie_data)
+        except Exception as exc:
+            app.logger.exception("NFToken check failed")
+            success, token, error, account, netscape = False, None, str(exc), {}, None
+        if success and token and account.get("membership_status") == "CURRENT_MEMBER":
+            return {
+                "link": f"https://netflix.com/?nftoken={quote(str(token), safe='')}",
+                "account": public_account(account),
+                "netscape": netscape,
+            }
+        last_error = error or "Tài khoản đã hết hạn"
+        release_cookie(connection, cookie_id, delete=True)
+        if attempt < 4:
+            try:
+                cookie_id, cookie_data = reserve_cookie(connection)
+            except ToolError:
+                break
+    refund_nftoken_request(connection, user_id, mode)
+    raise ToolError(f"Không tạo được NFToken: {last_error}", 409)
+
+
+@app.post("/api/tools/nftoken")
+@authenticated
+def create_nftoken():
+    try:
+        body = json_body()
+        mode = str(body.get("mode", "plan"))
+        quantity = int(body.get("quantity", 1))
+    except (ValueError, TypeError) as error:
+        return jsonify({"ok": False, "error": str(error) or "Dữ liệu không hợp lệ"}), 400
+    if mode not in {"plan", "vip"}:
+        return jsonify({"ok": False, "error": "Chế độ không hợp lệ"}), 400
+    if mode == "plan":
+        quantity = 1
+    if not 1 <= quantity <= 5:
+        return jsonify({"ok": False, "error": "Mỗi lần chỉ rút từ 1 đến 5 Cookie"}), 400
+    user_id = int(g.telegram_user["id"])
+    if tool_rate_limited(user_id, limit=5, window=60):
+        return jsonify({"ok": False, "error": "Bạn thao tác quá nhanh"}), 429
+    connection = db()
+    results = []
+    try:
+        for _ in range(quantity):
+            results.append(generate_one_nftoken(connection, user_id, mode))
+    except ToolError as error:
+        if not results:
+            return jsonify({"ok": False, "error": str(error)}), error.status
+    return jsonify(
+        {"ok": True, "items": results, "partial": len(results) != quantity, "quota": quota_payload(connection, user_id)}
+    )
+
+
+@app.post("/api/tools/tv-login")
+@authenticated
+def tv_login():
+    try:
+        tv_code = str(json_body().get("code", "")).replace(" ", "").replace("-", "")
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    if not (4 <= len(tv_code) <= 12 and tv_code.isalnum()):
+        return jsonify({"ok": False, "error": "Mã TV không hợp lệ"}), 400
+    user_id = int(g.telegram_user["id"])
+    if tool_rate_limited(user_id, limit=3, window=60):
+        return jsonify({"ok": False, "error": "Bạn thao tác quá nhanh"}), 429
+    connection = db()
+    cookie_id = None
+    try:
+        cookie_id, cookie_data = reserve_cookie(connection)
+        success, message, account = run_tv_login(cookie_data, tv_code)
+        release_cookie(connection, cookie_id, delete=("Cookie đã chết" in message))
+        cookie_id = None
+        if not success:
+            return jsonify({"ok": False, "error": message}), 409
+        return jsonify({"ok": True, "message": "TV đã được kết nối", "account": public_account(account)})
+    except ToolError as error:
+        return jsonify({"ok": False, "error": str(error)}), error.status
+    except Exception:
+        if cookie_id is not None:
+            release_cookie(connection, cookie_id)
+        app.logger.exception("TV login failed for user_id=%s", user_id)
+        return jsonify({"ok": False, "error": "Không thể đăng nhập TV lúc này"}), 500
+
+
+@app.post("/api/giftcode")
+@authenticated
+def redeem_giftcode():
+    try:
+        code = str(json_body().get("code", "")).strip().upper()
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    if not code or len(code) > 50:
+        return jsonify({"ok": False, "error": "Mã quà tặng không hợp lệ"}), 400
+    connection = db()
+    user_id = int(g.telegram_user["id"])
+    connection.execute("BEGIN IMMEDIATE")
+    gift = connection.execute(
+        "SELECT amount,uses FROM discount_codes WHERE code=?", (code,)
+    ).fetchone()
+    if not gift or gift["uses"] <= 0:
+        connection.rollback()
+        return jsonify({"ok": False, "error": "Mã không hợp lệ hoặc đã hết lượt"}), 409
+    connection.execute("UPDATE discount_codes SET uses=uses-1 WHERE code=?", (code,))
+    connection.execute("UPDATE users SET balance=balance+? WHERE user_id=?", (gift["amount"], user_id))
+    connection.commit()
+    return jsonify({"ok": True, "amount": gift["amount"]})
+
+
+@app.post("/api/deposits")
+@authenticated
+def create_deposit():
+    try:
+        amount = int(json_body().get("amount", 0))
+    except (ValueError, TypeError):
+        return jsonify({"ok": False, "error": "Số tiền không hợp lệ"}), 400
+    if not 10000 <= amount <= 100000000:
+        return jsonify({"ok": False, "error": "Số tiền phải từ 10.000đ đến 100.000.000đ"}), 400
+    connection = db()
+    user_id = int(g.telegram_user["id"])
+    cursor = connection.execute(
+        "INSERT INTO transactions(user_id,amount,status) VALUES(?,?,'PENDING')",
+        (user_id, amount),
+    )
+    connection.commit()
+    transaction_id = cursor.lastrowid
+    transfer_note = f"NAP {user_id} GD{transaction_id}"
+    bank_bin = os.getenv("VIETQR_BANK_BIN", "").strip()
+    bank_account = os.getenv("VIETQR_ACCOUNT_NUMBER", "").strip()
+    account_name = os.getenv("VIETQR_ACCOUNT_NAME", "").strip()
+    qr_url = ""
+    if bank_bin and bank_account:
+        qr_url = (
+            f"https://img.vietqr.io/image/{quote(bank_bin)}-{quote(bank_account)}-compact2.png"
+            f"?amount={amount}&addInfo={quote(transfer_note)}&accountName={quote(account_name)}"
+        )
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "✅ Duyệt nạp", "callback_data": f"admin_approve_tx_{transaction_id}"}],
+            [{"text": "🚫 Từ chối", "callback_data": f"admin_reject_tx_{transaction_id}"}],
+        ]
+    }
+    telegram_notify(
+        f"🔔 <b>YÊU CẦU NẠP TIỀN TỪ MINI APP</b>\n\n"
+        f"User ID: <code>{user_id}</code>\nSố tiền: <b>{amount:,}đ</b>\n"
+        f"Mã GD: <code>#{transaction_id}</code>",
+        keyboard,
+    )
+    return jsonify(
+        {"ok": True, "transactionId": transaction_id, "amount": amount, "transferNote": transfer_note, "qrUrl": qr_url}
+    )
+
+
+@app.post("/api/support")
+@authenticated
+def support_request():
+    try:
+        message = str(json_body().get("message", "")).strip()
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    if not 5 <= len(message) <= 1500:
+        return jsonify({"ok": False, "error": "Nội dung hỗ trợ phải từ 5 đến 1500 ký tự"}), 400
+    connection = db()
+    user_id = int(g.telegram_user["id"])
+    cursor = connection.execute(
+        "INSERT INTO miniapp_support(user_id,message,created_at) VALUES(?,?,?)",
+        (user_id, message, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+    )
+    connection.commit()
+    ticket_id = cursor.lastrowid
+    telegram_notify(
+        f"🛟 <b>HỖ TRỢ MINI APP #{ticket_id}</b>\n\n"
+        f"User ID: <code>{user_id}</code>\nNội dung: {html.escape(message)}"
+    )
+    return jsonify({"ok": True, "ticketId": ticket_id})
 
 
 @app.errorhandler(404)

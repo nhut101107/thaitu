@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from urllib.parse import urlencode
 
 import miniapp_server
@@ -45,6 +46,8 @@ class MiniAppTest(unittest.TestCase):
         connection.commit()
         connection.close()
         miniapp_server.migrate()
+        miniapp_server.TOOL_ATTEMPTS.clear()
+        miniapp_server.CHECKOUT_ATTEMPTS.clear()
         os.environ["TELEGRAM_BOT_TOKEN"] = TOKEN
         miniapp_server.app.config["TESTING"] = True
         self.client = miniapp_server.app.test_client()
@@ -88,6 +91,72 @@ class MiniAppTest(unittest.TestCase):
         connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
         self.assertEqual(connection.execute("SELECT balance FROM users WHERE user_id=1").fetchone()[0], 100000)
         self.assertEqual(connection.execute("SELECT COUNT(*) FROM purchase_history WHERE user_id=1").fetchone()[0], 0)
+        connection.close()
+
+    def test_free_cookie_runs_inside_miniapp_and_enforces_quota(self):
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute("INSERT OR REPLACE INTO plans(name,tokens_max,cookies_max) VALUES('VIP',2,1)")
+        connection.execute("UPDATE users SET plan_name='VIP' WHERE user_id=1")
+        connection.execute("INSERT INTO free_cookies(data) VALUES('NetflixId=free-cookie')")
+        connection.commit()
+        connection.close()
+        first = self.client.post("/api/tools/free-cookie", json={}, headers=self.headers)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json["cookie"], "NetflixId=free-cookie")
+        second = self.client.post("/api/tools/free-cookie", json={}, headers=self.headers)
+        self.assertEqual(second.status_code, 409)
+
+    def test_vip_nftoken_is_direct_and_deducts_only_on_success(self):
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute("UPDATE users SET credits=1 WHERE user_id=1")
+        connection.execute("INSERT INTO premium_cookies(data) VALUES('NetflixId=premium-cookie')")
+        connection.commit()
+        connection.close()
+        account = {"membership_status": "CURRENT_MEMBER", "email_masked": "tes***@mail.com", "plan": "Premium"}
+        with patch.object(miniapp_server, "run_cookie_check", return_value=(True, "safe-token", None, account, "netscape")):
+            response = self.client.post(
+                "/api/tools/nftoken", json={"mode": "vip", "quantity": 1}, headers=self.headers
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json["items"]), 1)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        self.assertEqual(connection.execute("SELECT credits FROM users WHERE user_id=1").fetchone()[0], 0)
+        connection.close()
+
+    def test_failed_vip_nftoken_refunds_credit(self):
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute("UPDATE users SET credits=1 WHERE user_id=1")
+        connection.execute("INSERT INTO premium_cookies(data) VALUES('NetflixId=dead-cookie')")
+        connection.commit()
+        connection.close()
+        with patch.object(miniapp_server, "run_cookie_check", return_value=(False, None, "dead", {}, None)):
+            response = self.client.post(
+                "/api/tools/nftoken", json={"mode": "vip", "quantity": 1}, headers=self.headers
+            )
+        self.assertEqual(response.status_code, 409)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        self.assertEqual(connection.execute("SELECT credits FROM users WHERE user_id=1").fetchone()[0], 1)
+        connection.close()
+
+    def test_giftcode_deposit_and_support_are_direct(self):
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute("INSERT INTO discount_codes(code,amount,uses) VALUES('GIFT',5000,1)")
+        connection.commit()
+        connection.close()
+        gift = self.client.post("/api/giftcode", json={"code": "gift"}, headers=self.headers)
+        self.assertEqual(gift.status_code, 200)
+        self.assertEqual(gift.json["amount"], 5000)
+        with patch.object(miniapp_server, "telegram_notify", return_value=True):
+            deposit = self.client.post("/api/deposits", json={"amount": 50000}, headers=self.headers)
+            support = self.client.post(
+                "/api/support", json={"message": "Tôi cần hỗ trợ đơn hàng"}, headers=self.headers
+            )
+        self.assertEqual(deposit.status_code, 200)
+        self.assertEqual(support.status_code, 200)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        self.assertEqual(connection.execute("SELECT balance FROM users WHERE user_id=1").fetchone()[0], 105000)
+        self.assertEqual(connection.execute("SELECT COUNT(*) FROM transactions WHERE user_id=1").fetchone()[0], 1)
+        self.assertEqual(connection.execute("SELECT COUNT(*) FROM miniapp_support WHERE user_id=1").fetchone()[0], 1)
         connection.close()
 
 

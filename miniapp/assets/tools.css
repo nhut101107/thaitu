@@ -1,0 +1,75 @@
+.tool-stock {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 14px 0;
+}
+.tool-stock span {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 13px;
+  color: var(--muted);
+}
+.tool-stock b { float: right; color: var(--green); font-size: 18px; }
+.field {
+  display: grid;
+  gap: 8px;
+  margin: 18px 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+.field input, .field textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  background: #f8fbfa;
+  border-radius: 15px;
+  padding: 14px;
+  color: var(--ink);
+  outline: none;
+}
+.field textarea { min-height: 130px; resize: vertical; }
+.field input:focus, .field textarea:focus {
+  border-color: var(--green);
+  box-shadow: 0 0 0 3px rgba(8,123,90,.1);
+}
+.button.secondary { background: #edf4f1; color: var(--green); margin-top: 9px; }
+.token-result { padding: 16px 0; border-top: 1px solid var(--line); }
+.token-result:first-of-type { border-top: 0; }
+.result-text {
+  width: 100%;
+  min-height: 180px;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  background: #f6faf8;
+  padding: 12px;
+  word-break: break-all;
+  margin: 12px 0;
+}
+.deposit-qr {
+  display: block;
+  width: min(100%, 320px);
+  margin: 15px auto;
+  border-radius: 18px;
+}
+.copy-value {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 13px;
+  background: #edf4f1;
+  border-radius: 14px;
+}
+.copy-value code { word-break: break-all; }
+.copy-value button { border: 0; background: transparent; color: var(--green); }
+.muted { color: var(--muted); }
+.help-list p {
+  display: grid;
+  gap: 5px;
+  padding: 13px 0;
+  margin: 0;
+  border-bottom: 1px solid var(--line);
+}
+.help-list small { color: var(--muted); line-height: 1.5; }

@@ -11,7 +11,9 @@
 - `premium_cookies`: dùng để hiển thị tồn kho tổng quan; dữ liệu cookie không bao giờ được trả về frontend.
 - `miniapp_cart`, `miniapp_checkouts`: giỏ hàng và khóa idempotency mới, được tạo tự động bởi migration không phá schema cũ.
 
-Bot hiện không có TOTP, referral hoặc quy trình yêu cầu bảo hành. Mini App không giả lập các chức năng này: TOTP được ghi rõ “Chưa khả dụng”; đơn hàng chỉ hiển thị thời hạn bảo hành nếu admin cấu hình `warranty_days`.
+Bot hiện không có TOTP, referral hoặc quy trình yêu cầu bảo hành. Mini App không hiển thị nút giả cho các chức năng này; đơn hàng chỉ hiển thị thời hạn bảo hành nếu admin cấu hình `warranty_days`.
+
+Các chức năng người dùng của bot hiện chạy trực tiếp trong Mini App: tạo NFToken theo gói, rút Cookie VIP, nhận Cookie miễn phí, nhập mã Netflix TV, đổi giftcode, tạo yêu cầu nạp tiền và gửi hỗ trợ. Mini App không đóng cuộc trò chuyện Telegram khi thao tác. Các chức năng quản trị vẫn nằm trong `/admin` để không mở quyền quản trị nhạy cảm qua giao diện web công khai.
 
 ## Chạy local
 
@@ -31,6 +33,8 @@ python code_goc.py
 ```
 
 Mini App production bắt buộc HTTPS. Reverse proxy domain HTTPS đến `127.0.0.1:8080`, đặt URL đó vào `TELEGRAM_MINIAPP_URL`, sau đó cấu hình cùng URL trong BotFather (`/newapp` hoặc `/myapps`). Nút Mini App chỉ xuất hiện khi biến này bắt đầu bằng `https://`; các nút bot cũ vẫn được giữ nguyên.
+
+Để nút nạp tiền tạo QR VietQR, cấu hình thêm `VIETQR_BANK_BIN`, `VIETQR_ACCOUNT_NUMBER` và `VIETQR_ACCOUNT_NAME`. Nếu chưa cấu hình, yêu cầu nạp vẫn được tạo và gửi Admin nhưng giao diện chỉ hiển thị nội dung chuyển khoản.
 
 ## Cấu hình sản phẩm mở rộng
 
