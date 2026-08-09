@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+tokenbot.txt
+bot_database.db
+bot_database.db-shm
+bot_database.db-wal
