@@ -55,3 +55,4 @@
 @media(max-width: 360px) {
   .feature-switches, .inventory-cards { grid-template-columns: 1fr; }
 }
+.admin-tx-summary{display:grid;gap:8px;margin:15px 0;padding:14px;border-radius:16px;background:#f4f8f6}.admin-tx-summary span{font-size:10px;color:var(--muted)}.admin-tx-summary b{display:block;margin-top:4px;color:var(--ink);font-size:12px}.danger-button{background:#be3d45!important;color:#fff!important}.review-note{padding:6px 8px;border-radius:8px;background:#fff}.tx-state{font-style:normal;font-size:9px;color:var(--muted);white-space:nowrap}

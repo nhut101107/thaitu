@@ -147,18 +147,55 @@ class MiniAppTest(unittest.TestCase):
         gift = self.client.post("/api/giftcode", json={"code": "gift"}, headers=self.headers)
         self.assertEqual(gift.status_code, 200)
         self.assertEqual(gift.json["amount"], 5000)
-        with patch.object(miniapp_server, "telegram_notify", return_value=True):
+        with patch.object(miniapp_server, "telegram_notify", return_value=True) as notify:
             deposit = self.client.post("/api/deposits", json={"amount": 50000}, headers=self.headers)
             support = self.client.post(
                 "/api/support", json={"message": "Tôi cần hỗ trợ đơn hàng"}, headers=self.headers
             )
         self.assertEqual(deposit.status_code, 200)
+        self.assertEqual(deposit.json["status"], "AWAITING_PAYMENT")
+        notify.assert_called_once()  # Chỉ yêu cầu hỗ trợ dùng thông báo Telegram cũ.
         self.assertEqual(support.status_code, 200)
         connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
         self.assertEqual(connection.execute("SELECT balance FROM users WHERE user_id=1").fetchone()[0], 105000)
         self.assertEqual(connection.execute("SELECT COUNT(*) FROM transactions WHERE user_id=1").fetchone()[0], 1)
         self.assertEqual(connection.execute("SELECT COUNT(*) FROM miniapp_support WHERE user_id=1").fetchone()[0], 1)
         connection.close()
+
+    def test_deposit_is_submitted_and_reviewed_entirely_in_miniapp(self):
+        created = self.client.post(
+            "/api/deposits", json={"amount": 70000}, headers=self.headers
+        )
+        self.assertEqual(created.status_code, 200)
+        transaction_id = created.json["transactionId"]
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        self.assertEqual(
+            connection.execute("SELECT status FROM transactions WHERE id=?", (transaction_id,)).fetchone()[0],
+            "AWAITING_PAYMENT",
+        )
+        connection.close()
+
+        submitted = self.client.post(
+            f"/api/deposits/{transaction_id}/submit", json={}, headers=self.headers
+        )
+        self.assertEqual(submitted.status_code, 200)
+        self.assertEqual(
+            self.client.post(
+                f"/api/deposits/{transaction_id}/submit", json={}, headers=self.headers
+            ).status_code,
+            409,
+        )
+        rejected = self.client.put(
+            f"/api/admin/transactions/{transaction_id}",
+            json={"status": "REJECTED", "note": "Chưa nhận được tiền"},
+            headers=self.headers,
+        )
+        self.assertEqual(rejected.status_code, 200)
+        history = self.client.get("/api/transactions", headers=self.headers).json["items"]
+        item = next(tx for tx in history if tx["id"] == transaction_id)
+        self.assertEqual(item["status"], "REJECTED")
+        self.assertEqual(item["review_note"], "Chưa nhận được tiền")
+        self.assertIsNotNone(item["reviewed_at"])
 
     def test_admin_api_is_hidden_from_normal_users(self):
         response = self.client.get(

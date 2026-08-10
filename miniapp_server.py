@@ -125,6 +125,20 @@ def migrate():
                 f"ALTER TABLE purchase_history ADD COLUMN {name} {definition}"
             )
 
+    transaction_columns = column_names(connection, "transactions")
+    transaction_additions = {
+        "transfer_note": "TEXT DEFAULT ''",
+        "created_at": "TEXT",
+        "submitted_at": "TEXT",
+        "reviewed_at": "TEXT",
+        "review_note": "TEXT DEFAULT ''",
+    }
+    for name, definition in transaction_additions.items():
+        if name not in transaction_columns:
+            connection.execute(
+                f"ALTER TABLE transactions ADD COLUMN {name} {definition}"
+            )
+
     connection.executescript(
         """
         CREATE TABLE IF NOT EXISTS miniapp_cart (
@@ -834,7 +848,9 @@ def order(order_id):
 @authenticated
 def transactions():
     rows = db().execute(
-        "SELECT id, amount, status FROM transactions WHERE user_id=? ORDER BY id DESC LIMIT 50",
+        """SELECT id,amount,status,transfer_note,created_at,submitted_at,
+                  reviewed_at,review_note
+           FROM transactions WHERE user_id=? ORDER BY id DESC LIMIT 50""",
         (int(g.telegram_user["id"]),),
     ).fetchall()
     return jsonify({"ok": True, "items": [dict(row) for row in rows]})
@@ -1047,13 +1063,19 @@ def create_deposit():
     except ToolError as error:
         return jsonify({"ok": False, "error": str(error)}), error.status
     user_id = int(g.telegram_user["id"])
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     cursor = connection.execute(
-        "INSERT INTO transactions(user_id,amount,status) VALUES(?,?,'PENDING')",
-        (user_id, amount),
+        """INSERT INTO transactions(user_id,amount,status,created_at)
+           VALUES(?,?,'AWAITING_PAYMENT',?)""",
+        (user_id, amount, now),
     )
-    connection.commit()
     transaction_id = cursor.lastrowid
     transfer_note = f"NAP {user_id} GD{transaction_id}"
+    connection.execute(
+        "UPDATE transactions SET transfer_note=? WHERE id=?",
+        (transfer_note, transaction_id),
+    )
+    connection.commit()
     bank_bin = os.getenv("VIETQR_BANK_BIN", "").strip()
     bank_account = os.getenv("VIETQR_ACCOUNT_NUMBER", "").strip()
     account_name = os.getenv("VIETQR_ACCOUNT_NAME", "").strip()
@@ -1063,21 +1085,39 @@ def create_deposit():
             f"https://img.vietqr.io/image/{quote(bank_bin)}-{quote(bank_account)}-compact2.png"
             f"?amount={amount}&addInfo={quote(transfer_note)}&accountName={quote(account_name)}"
         )
-    keyboard = {
-        "inline_keyboard": [
-            [{"text": "✅ Duyệt nạp", "callback_data": f"admin_approve_tx_{transaction_id}"}],
-            [{"text": "🚫 Từ chối", "callback_data": f"admin_reject_tx_{transaction_id}"}],
-        ]
-    }
-    telegram_notify(
-        f"🔔 <b>YÊU CẦU NẠP TIỀN TỪ MINI APP</b>\n\n"
-        f"User ID: <code>{user_id}</code>\nSố tiền: <b>{amount:,}đ</b>\n"
-        f"Mã GD: <code>#{transaction_id}</code>",
-        keyboard,
-    )
     return jsonify(
-        {"ok": True, "transactionId": transaction_id, "amount": amount, "transferNote": transfer_note, "qrUrl": qr_url}
+        {"ok": True, "transactionId": transaction_id, "amount": amount,
+         "status": "AWAITING_PAYMENT", "transferNote": transfer_note, "qrUrl": qr_url}
     )
+
+
+@app.post("/api/deposits/<int:transaction_id>/submit")
+@authenticated
+def submit_deposit(transaction_id):
+    connection = db()
+    user_id = int(g.telegram_user["id"])
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT status FROM transactions WHERE id=? AND user_id=?",
+            (transaction_id, user_id),
+        ).fetchone()
+        if not row:
+            connection.rollback()
+            return jsonify({"ok": False, "error": "Không tìm thấy giao dịch"}), 404
+        if row["status"] != "AWAITING_PAYMENT":
+            connection.rollback()
+            return jsonify({"ok": False, "error": "Giao dịch đã được gửi hoặc xử lý"}), 409
+        submitted_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        connection.execute(
+            "UPDATE transactions SET status='PENDING',submitted_at=? WHERE id=?",
+            (submitted_at, transaction_id),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return jsonify({"ok": True, "transactionId": transaction_id, "status": "PENDING"})
 
 
 @app.post("/api/support")
@@ -1155,9 +1195,11 @@ def admin_dashboard():
         "SELECT name,tokens_max,cookies_max FROM plans ORDER BY name"
     ).fetchall()
     transactions = connection.execute(
-        """SELECT t.id,t.user_id,u.username,t.amount,t.status
+        """SELECT t.id,t.user_id,u.username,t.amount,t.status,t.transfer_note,
+                  t.created_at,t.submitted_at,t.reviewed_at,t.review_note
            FROM transactions t LEFT JOIN users u ON u.user_id=t.user_id
-           ORDER BY CASE WHEN t.status='PENDING' THEN 0 ELSE 1 END,t.id DESC LIMIT 50"""
+           ORDER BY CASE t.status WHEN 'PENDING' THEN 0 WHEN 'AWAITING_PAYMENT' THEN 1 ELSE 2 END,
+                    t.id DESC LIMIT 50"""
     ).fetchall()
     codes = connection.execute(
         "SELECT code,amount,uses FROM discount_codes ORDER BY code LIMIT 100"
@@ -1317,11 +1359,15 @@ def admin_update_user(user_id):
 @admin_required
 def admin_update_transaction(transaction_id):
     try:
-        status = str(json_body().get("status", "")).upper()
+        body = json_body()
+        status = str(body.get("status", "")).upper()
+        note = str(body.get("note", "")).strip()[:500]
     except ValueError as error:
         return jsonify({"ok": False, "error": str(error)}), 400
     if status not in {"APPROVED", "REJECTED"}:
         return jsonify({"ok": False, "error": "Trạng thái không hợp lệ"}), 400
+    if status == "REJECTED" and len(note) < 3:
+        return jsonify({"ok": False, "error": "Vui lòng nhập lý do từ chối"}), 400
     connection = db()
     try:
         connection.execute("BEGIN IMMEDIATE")
@@ -1334,13 +1380,18 @@ def admin_update_transaction(transaction_id):
         if row["status"] != "PENDING":
             connection.rollback()
             return jsonify({"ok": False, "error": "Giao dịch đã được xử lý"}), 409
-        connection.execute("UPDATE transactions SET status=? WHERE id=?", (status, transaction_id))
+        reviewed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        connection.execute(
+            """UPDATE transactions
+               SET status=?,reviewed_at=?,review_note=? WHERE id=?""",
+            (status, reviewed_at, note, transaction_id),
+        )
         if status == "APPROVED":
             connection.execute(
                 "UPDATE users SET balance=balance+? WHERE user_id=?",
                 (row["amount"], row["user_id"]),
             )
-        admin_audit(connection, "transaction.update", transaction_id, status)
+        admin_audit(connection, "transaction.update", transaction_id, f"{status}: {note}")
         connection.commit()
     except Exception:
         connection.rollback()

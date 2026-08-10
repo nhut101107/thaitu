@@ -170,14 +170,48 @@ export function openGiftcode() {
   }});
 }
 
-export function openDeposit() {
-  modal(`<div class="confirm-icon">💸</div><h2>Nạp tiền</h2><label class="field">Số tiền<input id="deposit-amount" type="number" min="10000" max="100000000" step="10000" value="50000"></label><button class="button wide" data-create-deposit>Tạo yêu cầu nạp</button>`, {onOpen(root, close) {
-    root.querySelector("[data-create-deposit]").onclick = async (event) => {
-      const done = busyButton(event.currentTarget);
-      try { const result = await api.deposit(Number(root.querySelector("#deposit-amount").value)); close(); modal(`<div class="eyebrow">GIAO DỊCH #${result.transactionId}</div><h2>Chuyển khoản ${formatMoney(result.amount)}</h2>${result.qrUrl ? `<img class="deposit-qr" src="${escapeHtml(result.qrUrl)}" alt="QR chuyển khoản">` : '<div class="privacy-banner">Admin chưa cấu hình QR ngân hàng. Hãy dùng nội dung bên dưới khi chuyển khoản.</div>'}<p>Nội dung chuyển khoản</p><div class="copy-value"><code>${escapeHtml(result.transferNote)}</code><button data-copy-note>${icon("copy")}</button></div><p class="muted">Yêu cầu đã gửi đến Admin để duyệt.</p>`, {onOpen(resultRoot) { resultRoot.querySelector("[data-copy-note]").onclick = () => navigator.clipboard.writeText(result.transferNote).then(() => toast("Đã sao chép nội dung")); }}); }
+const depositLabels = {
+  AWAITING_PAYMENT: ["Chờ bạn chuyển khoản", "waiting"],
+  PENDING: ["Admin đang kiểm tra", "pending"],
+  APPROVED: ["Đã duyệt & cộng tiền", "approved"],
+  REJECTED: ["Đã từ chối", "rejected"],
+};
+
+function depositRows(items) {
+  if (!items.length) return '<div class="deposit-empty">Chưa có yêu cầu nạp tiền nào.</div>';
+  return items.map((tx) => {
+    const [label, kind] = depositLabels[tx.status] || [tx.status, "waiting"];
+    return `<article class="deposit-item ${kind}"><div class="deposit-item-top"><span><b>#${tx.id}</b><small>${escapeHtml(tx.created_at || "Mới tạo")}</small></span><em>${escapeHtml(label)}</em></div><strong>${formatMoney(tx.amount)}</strong>${tx.review_note ? `<p>${tx.status === "REJECTED" ? "Lý do" : "Ghi chú"}: ${escapeHtml(tx.review_note)}</p>` : ""}${tx.status === "AWAITING_PAYMENT" ? `<button class="button secondary wide" data-submit-old-deposit="${tx.id}">Tôi đã chuyển tiền</button>` : ""}</article>`;
+  }).join("");
+}
+
+async function showDepositPayment(result, closeWallet) {
+  closeWallet?.();
+  modal(`<div class="deposit-head"><span>💳</span><div><div class="eyebrow">GIAO DỊCH #${result.transactionId}</div><h2>Quét QR để chuyển khoản</h2></div></div><div class="deposit-amount"><small>SỐ TIỀN CẦN CHUYỂN</small><strong>${formatMoney(result.amount)}</strong></div>${result.qrUrl ? `<div class="deposit-qr-wrap"><img class="deposit-qr" src="${escapeHtml(result.qrUrl)}" alt="QR chuyển khoản"><small>Quét bằng ứng dụng ngân hàng</small></div>` : '<div class="privacy-banner">Admin chưa cấu hình QR ngân hàng. Hãy chuyển khoản với nội dung bên dưới.</div>'}<p class="deposit-label">Nội dung chuyển khoản</p><div class="copy-value"><code>${escapeHtml(result.transferNote)}</code><button data-copy-note>${icon("copy")}</button></div><div class="deposit-warning">Chuyển đúng số tiền và nội dung để Admin đối soát nhanh.</div><button class="button wide deposit-paid" data-submit-deposit>✓ Tôi đã chuyển tiền</button><button class="button secondary wide" data-later-deposit>Để sau</button>`, {onOpen(root, close) {
+    root.querySelector("[data-copy-note]").onclick = () => navigator.clipboard.writeText(result.transferNote).then(() => toast("Đã sao chép nội dung"));
+    root.querySelector("[data-later-deposit]").onclick = () => { close(); openDeposit(); };
+    root.querySelector("[data-submit-deposit]").onclick = async (event) => {
+      const done = busyButton(event.currentTarget, "Đang báo Admin...");
+      try { await api.submitDeposit(result.transactionId); close(); toast("Đã báo Admin, vui lòng chờ duyệt"); openDeposit(); }
       catch (error) { toast(error.message, "error"); done(); }
     };
   }});
+}
+
+export async function openDeposit() {
+  try {
+    const history = await api.transactions();
+    modal(`<div class="wallet-hero"><div><small>VÍ NFTOKEN</small><h2 data-wallet-balance>${formatMoney(state.bootstrap.user.balance)}</h2><p>Số dư khả dụng</p></div><span>${icon("wallet")}</span></div><section class="deposit-create"><h3>Nạp tiền nhanh</h3><div class="deposit-presets"><button data-deposit-value="50000">50K</button><button data-deposit-value="100000">100K</button><button data-deposit-value="200000">200K</button><button data-deposit-value="500000">500K</button></div><label class="field">Hoặc nhập số tiền<input id="deposit-amount" type="number" min="10000" max="100000000" step="10000" value="50000"></label><button class="button wide" data-create-deposit>Tạo mã QR</button></section><div class="deposit-history-title"><h3>Lịch sử nạp tiền</h3><button data-refresh-deposits>↻ Làm mới</button></div><div data-deposit-list>${depositRows(history.items)}</div>`, {onOpen(root, close) {
+      root.querySelectorAll("[data-deposit-value]").forEach((button) => button.onclick = () => { root.querySelector("#deposit-amount").value = button.dataset.depositValue; root.querySelectorAll("[data-deposit-value]").forEach((item) => item.classList.toggle("active", item === button)); });
+      let knownStatuses = Object.fromEntries(history.items.map((item) => [item.id, item.status]));
+      const refresh = async () => { const [result, bootstrap] = await Promise.all([api.transactions(), api.bootstrap()]); const list = root.querySelector("[data-deposit-list]"); if (!list) return; result.items.forEach((item) => { if (knownStatuses[item.id] && knownStatuses[item.id] !== item.status && ["APPROVED","REJECTED"].includes(item.status)) toast(item.status === "APPROVED" ? `Giao dịch #${item.id} đã được duyệt` : `Giao dịch #${item.id} bị từ chối`, item.status === "APPROVED" ? "success" : "error"); }); knownStatuses = Object.fromEntries(result.items.map((item) => [item.id, item.status])); state.bootstrap = bootstrap; root.querySelector("[data-wallet-balance]").textContent = formatMoney(bootstrap.user.balance); list.innerHTML = depositRows(result.items); bindSubmitOld(); };
+      const bindSubmitOld = () => root.querySelectorAll("[data-submit-old-deposit]").forEach((button) => button.onclick = async () => { try { await api.submitDeposit(button.dataset.submitOldDeposit); toast("Đã báo Admin"); await refresh(); } catch (error) { toast(error.message, "error"); } });
+      bindSubmitOld();
+      root.querySelector("[data-refresh-deposits]").onclick = () => refresh().catch((error) => toast(error.message, "error"));
+      root.querySelector("[data-create-deposit]").onclick = async (event) => { const done = busyButton(event.currentTarget); try { const result = await api.deposit(Number(root.querySelector("#deposit-amount").value)); showDepositPayment(result, close); } catch (error) { toast(error.message, "error"); done(); } };
+      const timer = setInterval(() => { if (!root.querySelector("[data-deposit-list]")) return clearInterval(timer); refresh().catch(() => {}); }, 7000);
+    }});
+  } catch (error) { toast(error.message, "error"); }
 }
 
 export function openSupport() {
@@ -191,5 +225,5 @@ export function openSupport() {
 }
 
 export function openHelp() {
-  modal(`<div class="confirm-icon">📚</div><h2>Hướng dẫn sử dụng</h2><div class="help-list"><p><b>NFToken theo gói</b><small>Dùng hạn mức hằng ngày của gói thành viên.</small></p><p><b>Cookie VIP</b><small>Dùng lượt đã mua trong cửa hàng; chỉ trừ khi thành công.</small></p><p><b>Đăng nhập TV</b><small>Mã TV có thời hạn ngắn, hãy nhập ngay khi TV hiển thị.</small></p><p><b>Nạp tiền</b><small>Chuyển đúng số tiền và nội dung; Admin duyệt trực tiếp từ Telegram.</small></p></div>`);
+  modal(`<div class="confirm-icon">📚</div><h2>Hướng dẫn sử dụng</h2><div class="help-list"><p><b>NFToken theo gói</b><small>Dùng hạn mức hằng ngày của gói thành viên.</small></p><p><b>Cookie VIP</b><small>Dùng lượt đã mua trong cửa hàng; chỉ trừ khi thành công.</small></p><p><b>Đăng nhập TV</b><small>Mã TV có thời hạn ngắn, hãy nhập ngay khi TV hiển thị.</small></p><p><b>Nạp tiền</b><small>Quét QR, bấm “Tôi đã chuyển tiền” và theo dõi kết quả duyệt ngay trong Mini App.</small></p></div>`);
 }

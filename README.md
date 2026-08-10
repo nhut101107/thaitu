@@ -13,7 +13,7 @@
 
 Bot hiện không có TOTP, referral hoặc quy trình yêu cầu bảo hành. Mini App không hiển thị nút giả cho các chức năng này; đơn hàng chỉ hiển thị thời hạn bảo hành nếu admin cấu hình `warranty_days`.
 
-Các chức năng người dùng của bot hiện chạy trực tiếp trong Mini App: tạo NFToken theo gói, rút Cookie VIP, nhận Cookie miễn phí, nhập mã Netflix TV, đổi giftcode, tạo yêu cầu nạp tiền và gửi hỗ trợ. Mini App không đóng cuộc trò chuyện Telegram khi thao tác.
+Các chức năng người dùng của bot hiện chạy trực tiếp trong Mini App: tạo NFToken theo gói, rút Cookie VIP, nhận Cookie miễn phí, nhập mã Netflix TV, đổi giftcode, tạo yêu cầu nạp tiền và gửi hỗ trợ. Luồng nạp tiền hoạt động hoàn toàn trong app: khách tạo QR, bấm “Tôi đã chuyển tiền”, theo dõi trạng thái; Admin duyệt hoặc từ chối kèm lý do và kết quả tự cập nhật cho khách. Mini App không đóng cuộc trò chuyện Telegram khi thao tác.
 
 Telegram ID trong `TELEGRAM_ADMIN_ID` có thêm Trung tâm quản trị riêng ngay trong Mini App. Admin có thể quản lý sản phẩm, giá, lượt, bảo hành và trạng thái bán; cấu hình hạn mức NFToken/Cookie của từng gói; cập nhật số dư, lượt, gói và trạng thái khóa của người dùng; duyệt hoặc từ chối nạp tiền; quản lý giftcode, đơn hàng và yêu cầu hỗ trợ; bật chế độ bảo trì, đăng thông báo, bật/tắt từng chức năng và bổ sung kho Cookie Premium/Free. Nhật ký quản trị lưu 100 thao tác gần nhất. Giao diện kho chỉ cho phép ghi thêm và dọn mục đã dùng, không có API đọc ngược nội dung Cookie. Mọi API `/api/admin/*` đều xác thực chữ ký Telegram và kiểm tra lại Admin ID ở backend; việc ẩn nút trên frontend không được dùng làm lớp bảo mật.
 
@@ -36,7 +36,7 @@ python code_goc.py
 
 Mini App production bắt buộc HTTPS. Reverse proxy domain HTTPS đến `127.0.0.1:8080`, đặt URL đó vào `TELEGRAM_MINIAPP_URL`, sau đó cấu hình cùng URL trong BotFather (`/newapp` hoặc `/myapps`). Nút Mini App chỉ xuất hiện khi biến này bắt đầu bằng `https://`; các nút bot cũ vẫn được giữ nguyên.
 
-Để nút nạp tiền tạo QR VietQR, cấu hình thêm `VIETQR_BANK_BIN`, `VIETQR_ACCOUNT_NUMBER` và `VIETQR_ACCOUNT_NAME`. Nếu chưa cấu hình, yêu cầu nạp vẫn được tạo và gửi Admin nhưng giao diện chỉ hiển thị nội dung chuyển khoản.
+Để nút nạp tiền tạo QR VietQR, cấu hình thêm `VIETQR_BANK_BIN`, `VIETQR_ACCOUNT_NUMBER` và `VIETQR_ACCOUNT_NAME`. Nếu chưa cấu hình, yêu cầu nạp vẫn được tạo nhưng giao diện chỉ hiển thị nội dung chuyển khoản. Giao dịch chỉ chuyển sang trạng thái chờ Admin sau khi khách bấm xác nhận đã chuyển tiền; không cần quay lại bot Telegram.
 
 ## Cấu hình sản phẩm mở rộng
 
