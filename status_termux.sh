@@ -23,7 +23,12 @@ status_one miniapp
 status_one bot
 status_one tunnel
 
-if [ -f "$LOG_DIR/tunnel.log" ]; then
+if [ -f "$RUN_DIR/miniapp_url" ]; then
+  url="$(cat "$RUN_DIR/miniapp_url" 2>/dev/null || true)"
+  if [ -n "$url" ]; then
+    echo "Mini App URL: $url"
+  fi
+elif [ -f "$LOG_DIR/tunnel.log" ]; then
   url="$(grep -o 'https://[-a-z0-9.]*trycloudflare.com' "$LOG_DIR/tunnel.log" | tail -1 || true)"
   if [ -n "$url" ]; then
     echo "Quick Tunnel URL: $url"
