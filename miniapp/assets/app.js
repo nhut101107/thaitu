@@ -2,6 +2,7 @@ import {api} from "./api.js";
 import {state, subscribe, update} from "./state.js";
 import {bottomNav, header, toast} from "./components.js";
 import {accountView, addToCart, claimFreeCookie, homeView, openCart, openDeposit, openGiftcode, openHelp, openNftoken, openOrder, openProduct, openSupport, openTvLogin, ordersView, storeView, toolsView} from "./views.js";
+import {adminView, bindAdminEvents, loadAdmin} from "./admin.js";
 
 const tg = window.Telegram?.WebApp;
 const app = document.querySelector("#app");
@@ -20,7 +21,8 @@ function render() {
   if (!state.bootstrap) return;
   document.querySelector("#header").innerHTML = header(state.bootstrap.user);
   document.querySelector("#bottom-nav").innerHTML = bottomNav(state.route);
-  content.innerHTML = ({home: homeView, store: storeView, orders: ordersView, tools: toolsView, account: accountView}[state.route] || homeView)();
+  const view = ({home: homeView, store: storeView, orders: ordersView, tools: toolsView, account: accountView, admin: adminView}[state.route] || homeView)();
+  content.innerHTML = `${view}<footer class="site-copyright">${state.bootstrap.copyright || "© 2026 mnhut. All rights reserved."}</footer>`;
   bindEvents();
 }
 
@@ -47,6 +49,7 @@ async function navigate(route) {
   window.scrollTo({top: 0, behavior: "smooth"});
   if (route === "orders") await loadOrders();
   if (route === "tools") await loadTools();
+  if (route === "admin") await loadAdmin();
 }
 
 function bindEvents() {
@@ -66,6 +69,7 @@ function bindEvents() {
   if (search) search.oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.search = search.value.trim(); loadProducts(); }, 300); };
   const clear = document.querySelector("[data-clear-search]"); if (clear) clear.onclick = () => { state.search = ""; loadProducts(); };
   const sort = document.querySelector("#sort-products"); if (sort) sort.onchange = () => { state.sort = sort.value; loadProducts(); };
+  bindAdminEvents();
 }
 
 async function boot() {

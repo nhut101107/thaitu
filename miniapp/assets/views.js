@@ -13,6 +13,7 @@ export function homeView() {
   const products = featured.length ? featured : state.products.slice(0, 4);
   return `<div class="page home-page">
     <div class="eyebrow">CHÀO MỪNG TRỞ LẠI</div><div class="welcome"><h1>Xin chào, ${escapeHtml(user.firstName)}<i>✦</i></h1><span>${escapeHtml(user.plan)}</span></div>
+    ${state.bootstrap.announcement ? `<div class="announcement-banner"><i>📣</i><p><b>Thông báo từ Admin</b><span>${escapeHtml(state.bootstrap.announcement)}</span></p></div>` : ""}
     <section class="balance-card"><div><small>SỐ DƯ KHẢ DỤNG</small><strong>${formatMoney(user.balance)}</strong></div><span>${user.credits} lượt Cookie VIP</span><hr><div class="balance-foot"><p>Tổng chi tiêu<b>${formatMoney(user.spent)}</b></p><button data-action="deposit">${icon("plus")} Nạp tiền</button></div></section>
     <div class="quick-grid">
       <button data-route="store"><i class="purple">${icon("store")}</i><b>Cửa hàng</b><small>Mua gói lượt Cookie</small>${icon("arrow")}</button>
@@ -47,17 +48,18 @@ export function ordersView(loading = false) {
 export function toolsView() {
   const quota = state.tools?.quota || state.bootstrap.quota || {};
   const stock = state.tools?.stock || {premium: state.bootstrap.inventory.premiumCookies, free: 0};
+  const flags = state.tools?.features || state.bootstrap.features || {};
   const tools = [
-    ["📺", "Đăng nhập Netflix TV", "Nhập mã TV và xử lý ngay trong app", "tv"],
-    ["⚡", "Tạo NFToken theo gói", `${quota.tokensUsed || 0}/${quota.tokensMax || 0} lượt hôm nay`, "plan-token"],
-    ["🍪", "Rút Cookie VIP", `${quota.credits || 0} lượt đã mua`, "vip-token"],
-    ["🎁", "Cookie miễn phí", `${quota.freeCookiesUsed || 0}/${quota.freeCookiesMax || 0} lượt hôm nay`, "free-cookie"],
-    ["🎟", "Nhập mã quà tặng", "Cộng số dư trực tiếp", "giftcode"],
-    ["💸", "Nạp tiền", "Tạo QR và yêu cầu duyệt", "deposit"],
-    ["🛟", "Báo lỗi & hỗ trợ", "Gửi thẳng yêu cầu đến Admin", "support"],
-    ["📚", "Hướng dẫn", "Xem cách sử dụng các chức năng", "help"],
+    ["📺", "Đăng nhập Netflix TV", "Nhập mã TV và xử lý ngay trong app", "tv", flags.tv],
+    ["⚡", "Tạo NFToken theo gói", `${quota.tokensUsed || 0}/${quota.tokensMax || 0} lượt hôm nay`, "plan-token", flags.planToken],
+    ["🍪", "Rút Cookie VIP", `${quota.credits || 0} lượt đã mua`, "vip-token", flags.vipToken],
+    ["🎁", "Cookie miễn phí", `${quota.freeCookiesUsed || 0}/${quota.freeCookiesMax || 0} lượt hôm nay`, "free-cookie", flags.freeCookie],
+    ["🎟", "Nhập mã quà tặng", "Cộng số dư trực tiếp", "giftcode", flags.giftcode],
+    ["💸", "Nạp tiền", "Tạo QR và yêu cầu duyệt", "deposit", flags.deposit],
+    ["🛟", "Báo lỗi & hỗ trợ", "Gửi thẳng yêu cầu đến Admin", "support", flags.support],
+    ["📚", "Hướng dẫn", "Xem cách sử dụng các chức năng", "help", true],
   ];
-  return `<div class="page"><div class="eyebrow">NFTOKEN TOOLBOX</div><div class="store-heading"><h1>Tiện ích nhanh</h1><span>TRỰC TIẾP</span></div><div class="privacy-banner">${icon("shield")}<div><b>Không rời Mini App</b><small>Mọi tác vụ bên dưới được xác thực và xử lý trực tiếp.</small></div></div><div class="tool-stock"><span>Kho Premium <b>${stock.premium || 0}</b></span><span>Kho Free <b>${stock.free || 0}</b></span></div><div class="tool-grid">${tools.map(([glyph,name,desc,action]) => `<button data-tool="${action}"><i>${glyph}</i><b>${name}</b><small>${desc}</small></button>`).join("")}</div></div>`;
+  return `<div class="page"><div class="eyebrow">NFTOKEN TOOLBOX</div><div class="store-heading"><h1>Tiện ích nhanh</h1><span>TRỰC TIẾP</span></div><div class="privacy-banner">${icon("shield")}<div><b>Không rời Mini App</b><small>Mọi tác vụ bên dưới được xác thực và xử lý trực tiếp.</small></div></div><div class="tool-stock"><span>Kho Premium <b>${stock.premium || 0}</b></span><span>Kho Free <b>${stock.free || 0}</b></span></div><div class="tool-grid">${tools.map(([glyph,name,desc,action,enabled]) => `<button data-tool="${action}" ${enabled === false ? "disabled" : ""}><i>${glyph}</i><b>${name}</b><small>${enabled === false ? "Admin đang tạm tắt chức năng" : desc}</small>${enabled === false ? "<em>Tạm tắt</em>" : ""}</button>`).join("")}</div></div>`;
 }
 
 export function accountView() {
@@ -66,8 +68,9 @@ export function accountView() {
   const avatar = user.photoUrl ? `<img src="${escapeHtml(user.photoUrl)}" alt="">` : initials;
   return `<div class="page account-page"><div class="profile-hero"><div class="profile-avatar">${avatar}</div><h1>${escapeHtml(`${user.firstName} ${user.lastName}`.trim())}</h1><p>${user.username ? `@${escapeHtml(user.username)}` : "Chưa đặt username"}</p><span>♕ ${escapeHtml(user.plan)}</span></div>
     <section class="panel account-list"><header><h2>Tài khoản</h2><small>An toàn & bảo mật</small></header><button data-action="deposit"><i>${icon("wallet")}</i><span><b>Số dư ví</b><small>${formatMoney(user.balance)} · Chạm để nạp</small></span>${icon("arrow")}</button><button data-route="orders"><i>${icon("orders")}</i><span><b>Lịch sử đơn hàng</b><small>${user.orderCount} đơn đã mua</small></span>${icon("arrow")}</button><button data-action="support"><i>${icon("account")}</i><span><b>Hỗ trợ trực tiếp</b><small>Gửi yêu cầu ngay trong app</small></span>${icon("arrow")}</button></section>
+    ${state.bootstrap.isAdmin ? `<button class="admin-entry" data-route="admin"><i>♛</i><span><b>Trung tâm quản trị</b><small>Quản lý toàn bộ hệ thống ngay trong Mini App</small></span>${icon("arrow")}</button>` : ""}
     <section class="panel commitments"><header><h2>Chính sách & cam kết</h2></header><p>♢ <span><b>Minh bạch gói dịch vụ</b><small>Thông tin lượt và giá được đọc trực tiếp từ hệ thống.</small></span></p><p>⚡ <span><b>Giao lượt tức thì</b><small>Lượt Cookie được cộng sau khi giao dịch thành công.</small></span></p><p>▣ <span><b>Chỉ xử lý sau thanh toán</b><small>Backend kiểm tra lại giá và số dư trong một transaction.</small></span></p></section>
-    <section class="panel membership"><h2>Hạng ${escapeHtml(user.plan)}</h2><p>Telegram ID: ${user.id}</p><div><i style="width:${Math.min(100, user.spent / 10000)}%"></i></div></section><footer class="version">NFTOKEN PRO MINI APP · VERSION 1.0</footer></div>`;
+    <section class="panel membership"><h2>Hạng ${escapeHtml(user.plan)}</h2><p>Telegram ID: ${user.id}</p><div><i style="width:${Math.min(100, user.spent / 10000)}%"></i></div></section></div>`;
 }
 
 export async function openProduct(id) {

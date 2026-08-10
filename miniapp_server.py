@@ -151,6 +151,28 @@ def migrate():
             status TEXT NOT NULL DEFAULT 'OPEN',
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS miniapp_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS miniapp_admin_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            admin_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            target TEXT NOT NULL,
+            details TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        );
+        INSERT OR IGNORE INTO miniapp_settings(key,value) VALUES
+            ('maintenance','0'),
+            ('announcement',''),
+            ('feature_tv','1'),
+            ('feature_plan_token','1'),
+            ('feature_vip_token','1'),
+            ('feature_free_cookie','1'),
+            ('feature_giftcode','1'),
+            ('feature_deposit','1'),
+            ('feature_support','1');
         CREATE INDEX IF NOT EXISTS idx_purchase_history_user_date
             ON purchase_history(user_id, date DESC);
         CREATE INDEX IF NOT EXISTS idx_transactions_user_id
@@ -159,6 +181,8 @@ def migrate():
             ON store(active, category);
         CREATE INDEX IF NOT EXISTS idx_miniapp_support_user
             ON miniapp_support(user_id, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_miniapp_admin_audit_date
+            ON miniapp_admin_audit(id DESC);
         """
     )
     connection.commit()
@@ -221,6 +245,26 @@ def authenticated(handler):
         connection.commit()
         if banned and banned[0]:
             return jsonify({"ok": False, "error": "Tài khoản đã bị khóa"}), 403
+        if app_setting(connection, "maintenance", "0") == "1" and user_id != configured_admin_id():
+            return jsonify({"ok": False, "error": "Hệ thống đang bảo trì, vui lòng quay lại sau"}), 503
+        return handler(*args, **kwargs)
+
+    return wrapped
+
+
+def configured_admin_id():
+    try:
+        return int(os.getenv("TELEGRAM_ADMIN_ID", "0").strip())
+    except ValueError:
+        return 0
+
+
+def admin_required(handler):
+    @authenticated
+    @wraps(handler)
+    def wrapped(*args, **kwargs):
+        if configured_admin_id() <= 0 or int(g.telegram_user["id"]) != configured_admin_id():
+            return jsonify({"ok": False, "error": "Bạn không có quyền quản trị"}), 403
         return handler(*args, **kwargs)
 
     return wrapped
@@ -233,6 +277,42 @@ def json_body():
     if not isinstance(value, dict):
         raise ValueError("JSON không hợp lệ")
     return value
+
+
+FEATURE_KEYS = {
+    "tv": "feature_tv",
+    "planToken": "feature_plan_token",
+    "vipToken": "feature_vip_token",
+    "freeCookie": "feature_free_cookie",
+    "giftcode": "feature_giftcode",
+    "deposit": "feature_deposit",
+    "support": "feature_support",
+}
+
+
+def app_setting(connection, key, default=""):
+    row = connection.execute("SELECT value FROM miniapp_settings WHERE key=?", (key,)).fetchone()
+    return row[0] if row else default
+
+
+def feature_flags(connection):
+    return {name: app_setting(connection, key, "1") == "1" for name, key in FEATURE_KEYS.items()}
+
+
+def require_feature(connection, name):
+    if not feature_flags(connection).get(name, False):
+        raise ToolError("Chức năng này đang được Admin tạm tắt", 503)
+
+
+def admin_audit(connection, action, target, details=""):
+    connection.execute(
+        """INSERT INTO miniapp_admin_audit(admin_id,action,target,details,created_at)
+           VALUES(?,?,?,?,?)""",
+        (
+            int(g.telegram_user["id"]), action, str(target), str(details)[:1000],
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        ),
+    )
 
 
 def checkout_rate_limited(user_id):
@@ -259,12 +339,30 @@ def tool_rate_limited(user_id, limit=6, window=30):
         return False
 
 
+def telegram_send(chat_id, text, reply_markup=None):
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token or not chat_id:
+        return False
+    payload = {"chat_id": str(chat_id), "text": text, "parse_mode": "HTML"}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    try:
+        telegram_request = Request(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(telegram_request, timeout=10) as response:
+            return 200 <= response.status < 300
+    except (OSError, URLError):
+        app.logger.warning("Unable to notify Telegram admin", exc_info=True)
+        return False
+
+
 def telegram_notify(text, reply_markup=None):
     """Best-effort admin notification; the user flow must not depend on Telegram delivery."""
-    token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    admin_id = os.getenv("TELEGRAM_ADMIN_ID", "").strip()
-    if not token or not admin_id:
-        return False
+    return telegram_send(os.getenv("TELEGRAM_ADMIN_ID", "").strip(), text, reply_markup)
 
 
 class ToolError(Exception):
@@ -387,21 +485,6 @@ def public_account(account):
         "quality": account.get("video_quality", "Không rõ"),
         "profiles": account.get("profile_count", "Không rõ"),
     }
-    payload = {"chat_id": admin_id, "text": text, "parse_mode": "HTML"}
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    try:
-        telegram_request = Request(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urlopen(telegram_request, timeout=10) as response:
-            return 200 <= response.status < 300
-    except (OSError, URLError):
-        app.logger.warning("Unable to notify Telegram admin", exc_info=True)
-        return False
 
 
 def ensure_user(connection, telegram_user):
@@ -509,6 +592,10 @@ def bootstrap():
             "inventory": {"premiumCookies": stock},
             "quota": quota,
             "support": os.getenv("SUPPORT_USERNAME", "@mnhutdznecon"),
+            "isAdmin": user_id == configured_admin_id(),
+            "copyright": "© 2026 mnhut. All rights reserved.",
+            "features": feature_flags(connection),
+            "announcement": app_setting(connection, "announcement", ""),
         }
     )
 
@@ -765,7 +852,7 @@ def tools_status():
         "SELECT COUNT(*) FROM free_cookies WHERE is_used=0"
     ).fetchone()[0]
     return jsonify(
-        {"ok": True, "quota": quota_payload(connection, user_id), "stock": {"premium": premium, "free": free}}
+        {"ok": True, "quota": quota_payload(connection, user_id), "stock": {"premium": premium, "free": free}, "features": feature_flags(connection)}
     )
 
 
@@ -774,6 +861,10 @@ def tools_status():
 def free_cookie():
     connection = db()
     user_id = int(g.telegram_user["id"])
+    try:
+        require_feature(connection, "freeCookie")
+    except ToolError as error:
+        return jsonify({"ok": False, "error": str(error)}), error.status
     if tool_rate_limited(user_id):
         return jsonify({"ok": False, "error": "Bạn thao tác quá nhanh"}), 429
     today = datetime.now().strftime("%Y-%m-%d")
@@ -859,9 +950,13 @@ def create_nftoken():
     if not 1 <= quantity <= 5:
         return jsonify({"ok": False, "error": "Mỗi lần chỉ rút từ 1 đến 5 Cookie"}), 400
     user_id = int(g.telegram_user["id"])
+    connection = db()
+    try:
+        require_feature(connection, "vipToken" if mode == "vip" else "planToken")
+    except ToolError as error:
+        return jsonify({"ok": False, "error": str(error)}), error.status
     if tool_rate_limited(user_id, limit=5, window=60):
         return jsonify({"ok": False, "error": "Bạn thao tác quá nhanh"}), 429
-    connection = db()
     results = []
     try:
         for _ in range(quantity):
@@ -887,6 +982,10 @@ def tv_login():
     if tool_rate_limited(user_id, limit=3, window=60):
         return jsonify({"ok": False, "error": "Bạn thao tác quá nhanh"}), 429
     connection = db()
+    try:
+        require_feature(connection, "tv")
+    except ToolError as error:
+        return jsonify({"ok": False, "error": str(error)}), error.status
     cookie_id = None
     try:
         cookie_id, cookie_data = reserve_cookie(connection)
@@ -915,6 +1014,10 @@ def redeem_giftcode():
     if not code or len(code) > 50:
         return jsonify({"ok": False, "error": "Mã quà tặng không hợp lệ"}), 400
     connection = db()
+    try:
+        require_feature(connection, "giftcode")
+    except ToolError as error:
+        return jsonify({"ok": False, "error": str(error)}), error.status
     user_id = int(g.telegram_user["id"])
     connection.execute("BEGIN IMMEDIATE")
     gift = connection.execute(
@@ -939,6 +1042,10 @@ def create_deposit():
     if not 10000 <= amount <= 100000000:
         return jsonify({"ok": False, "error": "Số tiền phải từ 10.000đ đến 100.000.000đ"}), 400
     connection = db()
+    try:
+        require_feature(connection, "deposit")
+    except ToolError as error:
+        return jsonify({"ok": False, "error": str(error)}), error.status
     user_id = int(g.telegram_user["id"])
     cursor = connection.execute(
         "INSERT INTO transactions(user_id,amount,status) VALUES(?,?,'PENDING')",
@@ -983,6 +1090,10 @@ def support_request():
     if not 5 <= len(message) <= 1500:
         return jsonify({"ok": False, "error": "Nội dung hỗ trợ phải từ 5 đến 1500 ký tự"}), 400
     connection = db()
+    try:
+        require_feature(connection, "support")
+    except ToolError as error:
+        return jsonify({"ok": False, "error": str(error)}), error.status
     user_id = int(g.telegram_user["id"])
     cursor = connection.execute(
         "INSERT INTO miniapp_support(user_id,message,created_at) VALUES(?,?,?)",
@@ -995,6 +1106,421 @@ def support_request():
         f"User ID: <code>{user_id}</code>\nNội dung: {html.escape(message)}"
     )
     return jsonify({"ok": True, "ticketId": ticket_id})
+
+
+def admin_product_values(body):
+    name = str(body.get("name", "")).strip()
+    description = str(body.get("description", "")).strip()
+    category = str(body.get("category", "Gói Cookie VIP")).strip()
+    image_url = str(body.get("imageUrl", "")).strip()
+    try:
+        price = int(body.get("price", 0))
+        credits = int(body.get("credits", 0))
+        warranty_days = int(body.get("warrantyDays", 0))
+    except (TypeError, ValueError) as error:
+        raise ValueError("Giá, lượt và bảo hành phải là số") from error
+    if not 1 <= len(name) <= 80:
+        raise ValueError("Tên sản phẩm phải từ 1 đến 80 ký tự")
+    if len(description) > 1000 or not 1 <= len(category) <= 80:
+        raise ValueError("Mô tả hoặc danh mục quá dài")
+    if price < 0 or credits < 0 or not 0 <= warranty_days <= 3650:
+        raise ValueError("Thông số sản phẩm không hợp lệ")
+    if image_url and not image_url.startswith("https://"):
+        raise ValueError("Ảnh sản phẩm phải dùng liên kết HTTPS")
+    return (
+        name, price, credits, description, category, image_url,
+        int(bool(body.get("featured", False))), warranty_days,
+        int(bool(body.get("active", True))),
+    )
+
+
+@app.get("/api/admin/dashboard")
+@admin_required
+def admin_dashboard():
+    connection = db()
+    query = request.args.get("q", "").strip()[:80]
+    user_where = ""
+    user_params = []
+    if query:
+        user_where = "WHERE CAST(user_id AS TEXT) LIKE ? OR username LIKE ?"
+        term = f"%{query}%"
+        user_params = [term, term]
+    users = connection.execute(
+        f"""SELECT user_id,username,balance,credits,plan_name,is_banned,last_active
+            FROM users {user_where} ORDER BY last_active DESC LIMIT 50""",
+        user_params,
+    ).fetchall()
+    products = connection.execute("SELECT * FROM store ORDER BY id DESC").fetchall()
+    plans = connection.execute(
+        "SELECT name,tokens_max,cookies_max FROM plans ORDER BY name"
+    ).fetchall()
+    transactions = connection.execute(
+        """SELECT t.id,t.user_id,u.username,t.amount,t.status
+           FROM transactions t LEFT JOIN users u ON u.user_id=t.user_id
+           ORDER BY CASE WHEN t.status='PENDING' THEN 0 ELSE 1 END,t.id DESC LIMIT 50"""
+    ).fetchall()
+    codes = connection.execute(
+        "SELECT code,amount,uses FROM discount_codes ORDER BY code LIMIT 100"
+    ).fetchall()
+    tickets = connection.execute(
+        """SELECT s.id,s.user_id,u.username,s.message,s.status,s.created_at
+           FROM miniapp_support s LEFT JOIN users u ON u.user_id=s.user_id
+           ORDER BY CASE WHEN s.status='OPEN' THEN 0 ELSE 1 END,s.id DESC LIMIT 50"""
+    ).fetchall()
+    orders = connection.execute(
+        """SELECT p.id,p.user_id,u.username,p.plan_name,p.price,p.date,p.quantity,
+                  p.status,p.warranty_until
+           FROM purchase_history p LEFT JOIN users u ON u.user_id=p.user_id
+           ORDER BY p.id DESC LIMIT 100"""
+    ).fetchall()
+    audit = connection.execute(
+        """SELECT id,admin_id,action,target,details,created_at
+           FROM miniapp_admin_audit ORDER BY id DESC LIMIT 100"""
+    ).fetchall()
+    stats = {
+        "users": connection.execute("SELECT COUNT(*) FROM users").fetchone()[0],
+        "revenue": connection.execute("SELECT COALESCE(SUM(price),0) FROM purchase_history").fetchone()[0],
+        "orders": connection.execute("SELECT COUNT(*) FROM purchase_history").fetchone()[0],
+        "pendingDeposits": connection.execute(
+            "SELECT COUNT(*) FROM transactions WHERE status='PENDING'"
+        ).fetchone()[0],
+        "premiumStock": connection.execute(
+            "SELECT COUNT(*) FROM premium_cookies WHERE is_used=0"
+        ).fetchone()[0],
+        "freeStock": connection.execute(
+            "SELECT COUNT(*) FROM free_cookies WHERE is_used=0"
+        ).fetchone()[0],
+        "premiumUsed": connection.execute(
+            "SELECT COUNT(*) FROM premium_cookies WHERE is_used=1"
+        ).fetchone()[0],
+        "freeUsed": connection.execute(
+            "SELECT COUNT(*) FROM free_cookies WHERE is_used=1"
+        ).fetchone()[0],
+        "openTickets": connection.execute(
+            "SELECT COUNT(*) FROM miniapp_support WHERE status='OPEN'"
+        ).fetchone()[0],
+    }
+    return jsonify({
+        "ok": True,
+        "stats": stats,
+        "products": [product_dict(row) for row in products],
+        "plans": [dict(row) for row in plans],
+        "users": [dict(row) for row in users],
+        "transactions": [dict(row) for row in transactions],
+        "codes": [dict(row) for row in codes],
+        "tickets": [dict(row) for row in tickets],
+        "orders": [dict(row) for row in orders],
+        "audit": [dict(row) for row in audit],
+        "settings": {
+            "maintenance": app_setting(connection, "maintenance", "0") == "1",
+            "announcement": app_setting(connection, "announcement", ""),
+            "features": feature_flags(connection),
+        },
+    })
+
+
+@app.post("/api/admin/products")
+@admin_required
+def admin_create_product():
+    try:
+        values = admin_product_values(json_body())
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    connection = db()
+    cursor = connection.execute(
+        """INSERT INTO store
+           (name,price,credits,description,category,image_url,featured,warranty_days,active)
+           VALUES(?,?,?,?,?,?,?,?,?)""",
+        values,
+    )
+    admin_audit(connection, "product.create", cursor.lastrowid, values[0])
+    connection.commit()
+    return jsonify({"ok": True, "id": cursor.lastrowid})
+
+
+@app.put("/api/admin/products/<int:item_id>")
+@admin_required
+def admin_update_product(item_id):
+    try:
+        values = admin_product_values(json_body())
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    connection = db()
+    updated = connection.execute(
+        """UPDATE store SET name=?,price=?,credits=?,description=?,category=?,image_url=?,
+           featured=?,warranty_days=?,active=? WHERE id=?""",
+        (*values, item_id),
+    )
+    if updated.rowcount == 1:
+        admin_audit(connection, "product.update", item_id, values[0])
+    connection.commit()
+    if updated.rowcount != 1:
+        return jsonify({"ok": False, "error": "Không tìm thấy sản phẩm"}), 404
+    return jsonify({"ok": True})
+
+
+@app.put("/api/admin/plans/<path:plan_name>")
+@admin_required
+def admin_save_plan(plan_name):
+    name = plan_name.strip().upper()
+    try:
+        body = json_body()
+        tokens_max = int(body.get("tokensMax", 0))
+        cookies_max = int(body.get("cookiesMax", 0))
+    except (ValueError, TypeError):
+        return jsonify({"ok": False, "error": "Hạn mức phải là số"}), 400
+    if not name or len(name) > 50 or tokens_max < 0 or cookies_max < 0:
+        return jsonify({"ok": False, "error": "Thông tin gói không hợp lệ"}), 400
+    connection = db()
+    connection.execute(
+        """INSERT INTO plans(name,tokens_max,cookies_max) VALUES(?,?,?)
+           ON CONFLICT(name) DO UPDATE SET
+             tokens_max=excluded.tokens_max,cookies_max=excluded.cookies_max""",
+        (name, tokens_max, cookies_max),
+    )
+    admin_audit(connection, "plan.save", name, f"tokens={tokens_max},cookies={cookies_max}")
+    connection.commit()
+    return jsonify({"ok": True, "name": name})
+
+
+@app.put("/api/admin/users/<int:user_id>")
+@admin_required
+def admin_update_user(user_id):
+    try:
+        body = json_body()
+        balance = int(body.get("balance", 0))
+        credits = int(body.get("credits", 0))
+        plan = str(body.get("plan", "FREE")).strip().upper()
+        banned = int(bool(body.get("isBanned", False)))
+    except (ValueError, TypeError):
+        return jsonify({"ok": False, "error": "Dữ liệu người dùng không hợp lệ"}), 400
+    if balance < 0 or balance > 10**12 or credits < 0 or credits > 10**9 or not plan:
+        return jsonify({"ok": False, "error": "Số dư, lượt hoặc gói không hợp lệ"}), 400
+    if user_id == configured_admin_id() and banned:
+        return jsonify({"ok": False, "error": "Không thể tự khóa tài khoản Admin"}), 400
+    connection = db()
+    if not connection.execute("SELECT 1 FROM plans WHERE name=?", (plan,)).fetchone():
+        return jsonify({"ok": False, "error": "Gói hạn mức không tồn tại"}), 400
+    updated = connection.execute(
+        "UPDATE users SET balance=?,credits=?,plan_name=?,is_banned=? WHERE user_id=?",
+        (balance, credits, plan, banned, user_id),
+    )
+    if updated.rowcount == 1:
+        admin_audit(connection, "user.update", user_id, f"plan={plan},banned={banned}")
+    connection.commit()
+    if updated.rowcount != 1:
+        return jsonify({"ok": False, "error": "Không tìm thấy người dùng"}), 404
+    return jsonify({"ok": True})
+
+
+@app.put("/api/admin/transactions/<int:transaction_id>")
+@admin_required
+def admin_update_transaction(transaction_id):
+    try:
+        status = str(json_body().get("status", "")).upper()
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    if status not in {"APPROVED", "REJECTED"}:
+        return jsonify({"ok": False, "error": "Trạng thái không hợp lệ"}), 400
+    connection = db()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT user_id,amount,status FROM transactions WHERE id=?", (transaction_id,)
+        ).fetchone()
+        if not row:
+            connection.rollback()
+            return jsonify({"ok": False, "error": "Không tìm thấy giao dịch"}), 404
+        if row["status"] != "PENDING":
+            connection.rollback()
+            return jsonify({"ok": False, "error": "Giao dịch đã được xử lý"}), 409
+        connection.execute("UPDATE transactions SET status=? WHERE id=?", (status, transaction_id))
+        if status == "APPROVED":
+            connection.execute(
+                "UPDATE users SET balance=balance+? WHERE user_id=?",
+                (row["amount"], row["user_id"]),
+            )
+        admin_audit(connection, "transaction.update", transaction_id, status)
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return jsonify({"ok": True})
+
+
+@app.put("/api/admin/codes/<path:code>")
+@admin_required
+def admin_save_code(code):
+    code = code.strip().upper()
+    try:
+        body = json_body()
+        amount = int(body.get("amount", 0))
+        uses = int(body.get("uses", 0))
+    except (ValueError, TypeError):
+        return jsonify({"ok": False, "error": "Giá trị mã không hợp lệ"}), 400
+    if not code or len(code) > 50 or amount < 0 or uses < 0:
+        return jsonify({"ok": False, "error": "Mã quà tặng không hợp lệ"}), 400
+    connection = db()
+    connection.execute(
+        """INSERT INTO discount_codes(code,amount,uses) VALUES(?,?,?)
+           ON CONFLICT(code) DO UPDATE SET amount=excluded.amount,uses=excluded.uses""",
+        (code, amount, uses),
+    )
+    admin_audit(connection, "giftcode.save", code, f"amount={amount},uses={uses}")
+    connection.commit()
+    return jsonify({"ok": True, "code": code})
+
+
+@app.put("/api/admin/support/<int:ticket_id>")
+@admin_required
+def admin_update_support(ticket_id):
+    try:
+        status = str(json_body().get("status", "")).upper()
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    if status not in {"OPEN", "CLOSED"}:
+        return jsonify({"ok": False, "error": "Trạng thái không hợp lệ"}), 400
+    connection = db()
+    updated = connection.execute(
+        "UPDATE miniapp_support SET status=? WHERE id=?", (status, ticket_id)
+    )
+    if updated.rowcount == 1:
+        admin_audit(connection, "support.update", ticket_id, status)
+    connection.commit()
+    if updated.rowcount != 1:
+        return jsonify({"ok": False, "error": "Không tìm thấy yêu cầu"}), 404
+    return jsonify({"ok": True})
+
+
+@app.post("/api/admin/support/<int:ticket_id>/reply")
+@admin_required
+def admin_reply_support(ticket_id):
+    try:
+        message = str(json_body().get("message", "")).strip()
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    if not 1 <= len(message) <= 1500:
+        return jsonify({"ok": False, "error": "Phản hồi phải từ 1 đến 1500 ký tự"}), 400
+    connection = db()
+    ticket = connection.execute(
+        "SELECT user_id FROM miniapp_support WHERE id=?", (ticket_id,)
+    ).fetchone()
+    if not ticket:
+        return jsonify({"ok": False, "error": "Không tìm thấy yêu cầu"}), 404
+    delivered = telegram_send(
+        ticket["user_id"],
+        f"🛟 <b>PHẢN HỒI HỖ TRỢ #{ticket_id}</b>\n\n{html.escape(message)}",
+    )
+    if not delivered:
+        return jsonify({"ok": False, "error": "Không gửi được tin nhắn Telegram cho người dùng"}), 502
+    connection.execute("UPDATE miniapp_support SET status='CLOSED' WHERE id=?", (ticket_id,))
+    admin_audit(connection, "support.reply", ticket_id, "Telegram reply delivered")
+    connection.commit()
+    return jsonify({"ok": True})
+
+
+@app.put("/api/admin/settings")
+@admin_required
+def admin_update_settings():
+    try:
+        body = json_body()
+        maintenance = bool(body.get("maintenance", False))
+        announcement = str(body.get("announcement", "")).strip()
+        features = body.get("features", {})
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    if len(announcement) > 500 or not isinstance(features, dict):
+        return jsonify({"ok": False, "error": "Cấu hình hệ thống không hợp lệ"}), 400
+    connection = db()
+    connection.execute(
+        "INSERT OR REPLACE INTO miniapp_settings(key,value) VALUES('maintenance',?)",
+        ("1" if maintenance else "0",),
+    )
+    connection.execute(
+        "INSERT OR REPLACE INTO miniapp_settings(key,value) VALUES('announcement',?)",
+        (announcement,),
+    )
+    for name, key in FEATURE_KEYS.items():
+        connection.execute(
+            "INSERT OR REPLACE INTO miniapp_settings(key,value) VALUES(?,?)",
+            (key, "1" if bool(features.get(name, True)) else "0"),
+        )
+    admin_audit(
+        connection, "settings.update", "miniapp",
+        f"maintenance={int(maintenance)},announcement={bool(announcement)}",
+    )
+    connection.commit()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/admin/inventory/<kind>")
+@admin_required
+def admin_add_inventory(kind):
+    table = {"premium": "premium_cookies", "free": "free_cookies"}.get(kind)
+    if not table:
+        return jsonify({"ok": False, "error": "Loại kho không hợp lệ"}), 400
+    try:
+        raw = str(json_body().get("data", "")).strip()
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    if not raw or len(raw.encode("utf-8")) > 60000:
+        return jsonify({"ok": False, "error": "Dữ liệu kho trống hoặc vượt quá 60KB"}), 400
+    entries = [entry.strip() for entry in raw.split("\n---\n") if entry.strip()]
+    if not 1 <= len(entries) <= 100:
+        return jsonify({"ok": False, "error": "Mỗi lần chỉ thêm tối đa 100 mục"}), 400
+    connection = db()
+    added = 0
+    for entry in entries:
+        if connection.execute(f"SELECT 1 FROM {table} WHERE data=? LIMIT 1", (entry,)).fetchone():
+            continue
+        connection.execute(f"INSERT INTO {table}(data,is_used) VALUES(?,0)", (entry,))
+        added += 1
+    admin_audit(connection, "inventory.add", kind, f"added={added},received={len(entries)}")
+    connection.commit()
+    return jsonify({"ok": True, "added": added, "duplicates": len(entries) - added})
+
+
+@app.post("/api/admin/inventory/<kind>/cleanup")
+@admin_required
+def admin_cleanup_inventory(kind):
+    table = {"premium": "premium_cookies", "free": "free_cookies"}.get(kind)
+    if not table:
+        return jsonify({"ok": False, "error": "Loại kho không hợp lệ"}), 400
+    connection = db()
+    deleted = connection.execute(f"DELETE FROM {table} WHERE is_used=1").rowcount
+    admin_audit(connection, "inventory.cleanup", kind, f"deleted_used={deleted}")
+    connection.commit()
+    return jsonify({"ok": True, "deleted": deleted})
+
+
+@app.put("/api/admin/orders/<int:order_id>")
+@admin_required
+def admin_update_order(order_id):
+    try:
+        body = json_body()
+        status = str(body.get("status", "COMPLETED")).strip().upper()
+        warranty_raw = str(body.get("warrantyUntil", "")).strip()
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    if status not in {"PROCESSING", "COMPLETED", "CANCELLED", "WARRANTY"}:
+        return jsonify({"ok": False, "error": "Trạng thái đơn không hợp lệ"}), 400
+    warranty = None
+    if warranty_raw:
+        try:
+            warranty = datetime.fromisoformat(warranty_raw).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return jsonify({"ok": False, "error": "Ngày bảo hành không hợp lệ"}), 400
+    connection = db()
+    updated = connection.execute(
+        "UPDATE purchase_history SET status=?,warranty_until=? WHERE id=?",
+        (status, warranty, order_id),
+    )
+    if updated.rowcount == 1:
+        admin_audit(connection, "order.update", order_id, f"status={status},warranty={warranty or '-'}")
+    connection.commit()
+    if updated.rowcount != 1:
+        return jsonify({"ok": False, "error": "Không tìm thấy đơn hàng"}), 404
+    return jsonify({"ok": True})
 
 
 @app.errorhandler(404)

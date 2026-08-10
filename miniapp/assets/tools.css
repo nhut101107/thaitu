@@ -73,3 +73,8 @@
   border-bottom: 1px solid var(--line);
 }
 .help-list small { color: var(--muted); line-height: 1.5; }
+.announcement-banner { display:flex; gap:12px; align-items:flex-start; margin-bottom:16px; padding:15px; border-radius:18px; background:#fff3cf; border:1px solid #ecd991; }
+.announcement-banner i { font-style:normal; font-size:22px; }
+.announcement-banner p { margin:0; }
+.announcement-banner b, .announcement-banner span { display:block; }
+.announcement-banner span { margin-top:4px; color:#746642; line-height:1.5; font-size:11px; }

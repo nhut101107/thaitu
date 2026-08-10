@@ -5,6 +5,7 @@ export const state = {
   cart: {items: [], count: 0, total: 0},
   orders: [],
   tools: null,
+  admin: null,
   route: "home",
   search: "",
   category: "",

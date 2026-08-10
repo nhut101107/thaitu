@@ -49,6 +49,7 @@ class MiniAppTest(unittest.TestCase):
         miniapp_server.TOOL_ATTEMPTS.clear()
         miniapp_server.CHECKOUT_ATTEMPTS.clear()
         os.environ["TELEGRAM_BOT_TOKEN"] = TOKEN
+        os.environ["TELEGRAM_ADMIN_ID"] = "1"
         miniapp_server.app.config["TESTING"] = True
         self.client = miniapp_server.app.test_client()
         self.headers = {"X-Telegram-Init-Data": signed_init_data(1)}
@@ -158,6 +159,142 @@ class MiniAppTest(unittest.TestCase):
         self.assertEqual(connection.execute("SELECT COUNT(*) FROM transactions WHERE user_id=1").fetchone()[0], 1)
         self.assertEqual(connection.execute("SELECT COUNT(*) FROM miniapp_support WHERE user_id=1").fetchone()[0], 1)
         connection.close()
+
+    def test_admin_api_is_hidden_from_normal_users(self):
+        response = self.client.get(
+            "/api/admin/dashboard",
+            headers={"X-Telegram-Init-Data": signed_init_data(2)},
+        )
+        self.assertEqual(response.status_code, 403)
+        bootstrap = self.client.get("/api/bootstrap", headers=self.headers)
+        self.assertTrue(bootstrap.json["isAdmin"])
+
+    def test_admin_can_manage_products_plans_users_deposits_codes_and_support(self):
+        product = self.client.post(
+            "/api/admin/products",
+            json={
+                "name": "VIP PRO", "price": 50000, "credits": 25,
+                "category": "VIP", "description": "Gói quản trị tạo",
+                "warrantyDays": 7, "featured": True, "active": True,
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(product.status_code, 200)
+        self.assertEqual(
+            self.client.put(
+                "/api/admin/plans/VIP%20PRO",
+                json={"tokensMax": 10, "cookiesMax": 2}, headers=self.headers,
+            ).status_code,
+            200,
+        )
+        user = self.client.put(
+            "/api/admin/users/2",
+            json={"balance": 120000, "credits": 9, "plan": "VIP PRO", "isBanned": False},
+            headers=self.headers,
+        )
+        self.assertEqual(user.status_code, 200)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        tx_id = connection.execute(
+            "INSERT INTO transactions(user_id,amount,status) VALUES(2,30000,'PENDING')"
+        ).lastrowid
+        ticket_id = connection.execute(
+            "INSERT INTO miniapp_support(user_id,message,created_at) VALUES(2,'help','2026-01-01')"
+        ).lastrowid
+        connection.commit()
+        connection.close()
+        approved = self.client.put(
+            f"/api/admin/transactions/{tx_id}", json={"status": "APPROVED"}, headers=self.headers
+        )
+        self.assertEqual(approved.status_code, 200)
+        duplicate = self.client.put(
+            f"/api/admin/transactions/{tx_id}", json={"status": "APPROVED"}, headers=self.headers
+        )
+        self.assertEqual(duplicate.status_code, 409)
+        self.assertEqual(
+            self.client.put(
+                "/api/admin/codes/WELCOME", json={"amount": 10000, "uses": 5}, headers=self.headers
+            ).status_code,
+            200,
+        )
+        self.assertEqual(
+            self.client.put(
+                f"/api/admin/support/{ticket_id}", json={"status": "CLOSED"}, headers=self.headers
+            ).status_code,
+            200,
+        )
+        with patch.object(miniapp_server, "telegram_send", return_value=True):
+            reply = self.client.post(
+                f"/api/admin/support/{ticket_id}/reply",
+                json={"message": "Admin đã xử lý yêu cầu của bạn"}, headers=self.headers,
+            )
+        self.assertEqual(reply.status_code, 200)
+        self.assertEqual(
+            self.client.put(
+                "/api/admin/users/1",
+                json={"balance": 0, "credits": 0, "plan": "FREE", "isBanned": True},
+                headers=self.headers,
+            ).status_code,
+            400,
+        )
+        dashboard = self.client.get("/api/admin/dashboard", headers=self.headers)
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertTrue(any(item["name"] == "VIP PRO" for item in dashboard.json["products"]))
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        self.assertEqual(connection.execute("SELECT balance FROM users WHERE user_id=2").fetchone()[0], 150000)
+        self.assertEqual(connection.execute("SELECT status FROM miniapp_support WHERE id=?", (ticket_id,)).fetchone()[0], "CLOSED")
+        connection.close()
+
+    def test_admin_controls_features_inventory_orders_maintenance_and_audit(self):
+        settings = self.client.put(
+            "/api/admin/settings",
+            json={
+                "maintenance": False,
+                "announcement": "Thông báo kiểm thử",
+                "features": {
+                    "tv": True, "planToken": True, "vipToken": True,
+                    "freeCookie": False, "giftcode": True,
+                    "deposit": True, "support": True,
+                },
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(settings.status_code, 200)
+        disabled = self.client.post("/api/tools/free-cookie", json={}, headers=self.headers)
+        self.assertEqual(disabled.status_code, 503)
+        inventory = self.client.post(
+            "/api/admin/inventory/premium",
+            json={"data": "NetflixId=one\n---\nNetflixId=two"}, headers=self.headers,
+        )
+        self.assertEqual(inventory.status_code, 200)
+        self.assertEqual(inventory.json["added"], 2)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        order_id = connection.execute(
+            "INSERT INTO purchase_history(user_id,plan_name,price,date) VALUES(2,'VIP',10000,'2026-01-01')"
+        ).lastrowid
+        connection.commit()
+        connection.close()
+        order = self.client.put(
+            f"/api/admin/orders/{order_id}",
+            json={"status": "WARRANTY", "warrantyUntil": "2026-12-31"},
+            headers=self.headers,
+        )
+        self.assertEqual(order.status_code, 200)
+        dashboard = self.client.get("/api/admin/dashboard", headers=self.headers)
+        self.assertEqual(dashboard.json["stats"]["premiumStock"], 2)
+        self.assertEqual(dashboard.json["settings"]["announcement"], "Thông báo kiểm thử")
+        self.assertGreaterEqual(len(dashboard.json["audit"]), 3)
+        self.assertNotIn("data", dashboard.json)
+        maintenance = self.client.put(
+            "/api/admin/settings",
+            json={"maintenance": True, "announcement": "Bảo trì", "features": {}},
+            headers=self.headers,
+        )
+        self.assertEqual(maintenance.status_code, 200)
+        normal = self.client.get(
+            "/api/bootstrap", headers={"X-Telegram-Init-Data": signed_init_data(2)}
+        )
+        self.assertEqual(normal.status_code, 503)
+        self.assertEqual(self.client.get("/api/bootstrap", headers=self.headers).status_code, 200)
 
 
 if __name__ == "__main__":
