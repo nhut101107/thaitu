@@ -4,11 +4,10 @@ set -u
 APP_DIR="${APP_DIR:-$HOME/nftoken-app}"
 RUN_DIR="$APP_DIR/.run"
 
-stop_one() {
-  local name="$1"
-  local file="$RUN_DIR/$name.pid"
+stop_pidfile() {
+  local label="$1"
+  local file="$2"
   if [ ! -f "$file" ]; then
-    echo "$name: không có PID"
     return
   fi
   local pid
@@ -19,14 +18,18 @@ stop_one() {
     if kill -0 "$pid" 2>/dev/null; then
       kill -9 "$pid" 2>/dev/null || true
     fi
-    echo "$name: đã dừng"
-  else
-    echo "$name: không chạy"
+    echo "$label: đã dừng"
   fi
   rm -f "$file"
 }
 
-stop_one tunnel
-stop_one bot
-stop_one miniapp
+for name in bot tunnel miniapp; do
+  stop_pidfile "$name supervisor" "$RUN_DIR/$name.supervisor.pid"
+done
+for name in bot tunnel miniapp; do
+  stop_pidfile "$name" "$RUN_DIR/$name.pid"
+done
+
+rm -f "$RUN_DIR/miniapp_url"
 termux-wake-unlock >/dev/null 2>&1 || true
+echo "NFToken Pro đã dừng."
