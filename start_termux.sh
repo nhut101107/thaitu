@@ -18,31 +18,29 @@ if [ -f .env ]; then
   set +a
 fi
 
-if [ -f .venv/bin/activate ]; then
-  # shellcheck disable=SC1091
-  . .venv/bin/activate
-fi
-
-need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || {
-    echo "Thiếu lệnh '$1'. Hãy chạy: bash setup_termux.sh"
-    exit 1
-  }
-}
-
-need_cmd python
-need_cmd cloudflared
-
-if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
-  echo "Thiếu TELEGRAM_BOT_TOKEN trong .env"
+PYTHON="$APP_DIR/.venv/bin/python"
+if [ ! -x "$PYTHON" ]; then
+  echo "Không thấy Python trong .venv. Hãy chạy: bash setup_termux.sh"
   exit 1
 fi
 
+if ! command -v cloudflared >/dev/null 2>&1; then
+  echo "Thiếu cloudflared. Hãy chạy: bash setup_termux.sh"
+  exit 1
+fi
+
+if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ "${TELEGRAM_BOT_TOKEN:-}" = "replace_with_botfather_token" ]; then
+  echo "Thiếu TELEGRAM_BOT_TOKEN thật trong .env"
+  exit 1
+fi
+
+export MINIAPP_HOST="${MINIAPP_HOST:-127.0.0.1}"
+export MINIAPP_PORT
+
 termux-wake-lock >/dev/null 2>&1 || true
 
-stop_pidfile() {
-  local name="$1"
-  local file="$RUN_DIR/$name.pid"
+kill_pidfile() {
+  local file="$1"
   if [ -f "$file" ]; then
     local pid
     pid="$(cat "$file" 2>/dev/null || true)"
@@ -56,11 +54,16 @@ stop_pidfile() {
 }
 
 cleanup() {
+  trap - INT TERM EXIT
   echo
   echo "Đang dừng NFToken Pro..."
-  stop_pidfile tunnel
-  stop_pidfile bot
-  stop_pidfile miniapp
+  for name in bot tunnel miniapp; do
+    kill_pidfile "$RUN_DIR/$name.supervisor.pid"
+  done
+  for name in bot tunnel miniapp; do
+    kill_pidfile "$RUN_DIR/$name.pid"
+  done
+  rm -f "$RUN_DIR/miniapp_url"
   termux-wake-unlock >/dev/null 2>&1 || true
 }
 trap cleanup INT TERM EXIT
@@ -68,6 +71,7 @@ trap cleanup INT TERM EXIT
 run_supervised() {
   local name="$1"
   shift
+  trap 'exit 0' INT TERM
   while true; do
     echo "[$(date '+%F %T')] start $name" >> "$LOG_DIR/supervisor.log"
     "$@" >> "$LOG_DIR/$name.log" 2>&1 &
@@ -81,39 +85,71 @@ run_supervised() {
   done
 }
 
-start_tunnel() {
-  if [ -n "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
-    run_supervised tunnel cloudflared tunnel --no-autoupdate run --token "$CLOUDFLARE_TUNNEL_TOKEN"
-  elif [ "$TUNNEL_MODE" = "named" ]; then
-    echo "TUNNEL_MODE=named nhưng chưa có CLOUDFLARE_TUNNEL_TOKEN" >> "$LOG_DIR/tunnel.log"
-    return 1
-  else
-    run_supervised tunnel cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:$MINIAPP_PORT"
-  fi
+start_supervisor() {
+  local name="$1"
+  shift
+  run_supervised "$name" "$@" &
+  local supervisor=$!
+  echo "$supervisor" > "$RUN_DIR/$name.supervisor.pid"
+  echo "$supervisor"
 }
 
-export MINIAPP_HOST="${MINIAPP_HOST:-127.0.0.1}"
-export MINIAPP_PORT
+wait_for_quick_url() {
+  local url=""
+  local i
+  for i in $(seq 1 30); do
+    url="$(grep -o 'https://[-a-z0-9.]*trycloudflare.com' "$LOG_DIR/tunnel.log" 2>/dev/null | tail -1 || true)"
+    if [ -n "$url" ]; then
+      echo "$url"
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
 
-run_supervised miniapp python miniapp_server.py &
-SUP_MINIAPP=$!
-run_supervised bot python code_goc.py &
-SUP_BOT=$!
-start_tunnel &
-SUP_TUNNEL=$!
+: > "$LOG_DIR/tunnel.log"
+rm -f "$RUN_DIR/miniapp_url"
+
+SUP_MINIAPP="$(start_supervisor miniapp "$PYTHON" miniapp_server.py)"
+sleep 1
+
+if [ "$TUNNEL_MODE" = "named" ]; then
+  if [ -z "$CLOUDFLARE_TUNNEL_TOKEN" ]; then
+    echo "TUNNEL_MODE=named nhưng chưa có CLOUDFLARE_TUNNEL_TOKEN trong .env"
+    exit 1
+  fi
+  if [ -z "${TELEGRAM_MINIAPP_URL:-}" ] || [[ "${TELEGRAM_MINIAPP_URL:-}" != https://* ]]; then
+    echo "Named Tunnel cần TELEGRAM_MINIAPP_URL=https://domain-cua-ban trong .env"
+    exit 1
+  fi
+  SUP_TUNNEL="$(start_supervisor tunnel cloudflared tunnel --no-autoupdate run --token "$CLOUDFLARE_TUNNEL_TOKEN")"
+  PUBLIC_URL="$TELEGRAM_MINIAPP_URL"
+else
+  SUP_TUNNEL="$(start_supervisor tunnel cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:$MINIAPP_PORT")"
+  echo "Đang lấy URL HTTPS từ Cloudflare Quick Tunnel..."
+  if ! PUBLIC_URL="$(wait_for_quick_url)"; then
+    echo "Không lấy được Quick Tunnel URL sau 30 giây. Log gần nhất:"
+    tail -30 "$LOG_DIR/tunnel.log" 2>/dev/null || true
+    exit 1
+  fi
+  export TELEGRAM_MINIAPP_URL="$PUBLIC_URL"
+fi
+
+echo "$PUBLIC_URL" > "$RUN_DIR/miniapp_url"
+SUP_BOT="$(start_supervisor bot "$PYTHON" code_goc.py)"
 
 sleep 2
 
-echo ""
+echo
 echo "NFToken Pro đang chạy trên Termux"
-echo "- Mini App local: http://127.0.0.1:$MINIAPP_PORT"
-echo "- Log Mini App: $LOG_DIR/miniapp.log"
-echo "- Log Bot:      $LOG_DIR/bot.log"
-echo "- Log Tunnel:   $LOG_DIR/tunnel.log"
-echo ""
-echo "Nếu dùng Quick Tunnel, xem URL HTTPS bằng:"
-echo "  grep -o 'https://[-a-z0-9.]*trycloudflare.com' '$LOG_DIR/tunnel.log' | tail -1"
-echo ""
+echo "- Mini App local:  http://127.0.0.1:$MINIAPP_PORT"
+echo "- Mini App public: $PUBLIC_URL"
+echo "- Log Mini App:    $LOG_DIR/miniapp.log"
+echo "- Log Bot:         $LOG_DIR/bot.log"
+echo "- Log Tunnel:      $LOG_DIR/tunnel.log"
+echo
+echo "Kiểm tra trạng thái ở terminal khác: bash status_termux.sh"
 echo "Nhấn CTRL+C để dừng toàn bộ."
 
-wait "$SUP_MINIAPP" "$SUP_BOT" "$SUP_TUNNEL"
+wait "$SUP_MINIAPP" "$SUP_TUNNEL" "$SUP_BOT"
