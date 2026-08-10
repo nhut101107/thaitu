@@ -1,11 +1,14 @@
 import hashlib
 import hmac
 import html
+import io
 import json
 import os
 import sqlite3
 import threading
 import time
+import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from functools import wraps
 from urllib.error import URLError
@@ -28,7 +31,7 @@ MIGRATION_LOCK = threading.Lock()
 MIGRATED_PATHS = set()
 
 app = Flask(__name__, static_folder=None)
-app.config["MAX_CONTENT_LENGTH"] = 64 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024
 
 
 def db():
@@ -98,8 +101,15 @@ def migrate():
             VALUES('FREE', 0, 0);
         """
     )
+    user_columns = column_names(connection, "users")
+    if "nftoken_credits" not in user_columns:
+        connection.execute(
+            "ALTER TABLE users ADD COLUMN nftoken_credits INTEGER DEFAULT 0"
+        )
+
     store_columns = column_names(connection, "store")
     additions = {
+        "nftoken_credits": "INTEGER DEFAULT 0",
         "description": "TEXT DEFAULT ''",
         "category": "TEXT DEFAULT 'Gói Cookie VIP'",
         "image_url": "TEXT DEFAULT ''",
@@ -414,25 +424,35 @@ def reserve_nftoken_request(connection, user_id, mode):
         if updated.rowcount != 1:
             connection.rollback()
             raise ToolError("Bạn đã hết lượt Cookie VIP", 409)
+        quota_source = "vip"
     else:
-        plan_name = connection.execute(
-            "SELECT plan_name FROM users WHERE user_id=?", (user_id,)
-        ).fetchone()[0]
-        plan = connection.execute(
-            "SELECT tokens_max FROM plans WHERE name=?", (plan_name,)
-        ).fetchone()
-        tokens_max = plan[0] if plan else 0
-        connection.execute(
-            "INSERT OR IGNORE INTO usage(user_id,date) VALUES(?,?)", (user_id, today)
+        paid = connection.execute(
+            """UPDATE users SET nftoken_credits=nftoken_credits-1
+               WHERE user_id=? AND nftoken_credits>0""",
+            (user_id,),
         )
-        updated = connection.execute(
-            """UPDATE usage SET tokens_used=tokens_used+1
-               WHERE user_id=? AND date=? AND tokens_used<?""",
-            (user_id, today, tokens_max),
-        )
-        if updated.rowcount != 1:
-            connection.rollback()
-            raise ToolError("Bạn đã hết lượt tạo NFToken hôm nay", 409)
+        if paid.rowcount == 1:
+            quota_source = "paid_nftoken"
+        else:
+            plan_name = connection.execute(
+                "SELECT plan_name FROM users WHERE user_id=?", (user_id,)
+            ).fetchone()[0]
+            plan = connection.execute(
+                "SELECT tokens_max FROM plans WHERE name=?", (plan_name,)
+            ).fetchone()
+            tokens_max = plan[0] if plan else 0
+            connection.execute(
+                "INSERT OR IGNORE INTO usage(user_id,date) VALUES(?,?)", (user_id, today)
+            )
+            updated = connection.execute(
+                """UPDATE usage SET tokens_used=tokens_used+1
+                   WHERE user_id=? AND date=? AND tokens_used<?""",
+                (user_id, today, tokens_max),
+            )
+            if updated.rowcount != 1:
+                connection.rollback()
+                raise ToolError("Bạn đã hết lượt tạo NFToken", 409)
+            quota_source = "daily_nftoken"
     row = connection.execute(
         "SELECT id, data FROM premium_cookies WHERE is_used=0 ORDER BY RANDOM() LIMIT 1"
     ).fetchone()
@@ -441,14 +461,19 @@ def reserve_nftoken_request(connection, user_id, mode):
         raise ToolError("Kho Cookie Premium đang trống", 409)
     connection.execute("UPDATE premium_cookies SET is_used=1 WHERE id=?", (row["id"],))
     connection.commit()
-    return row["id"], row["data"]
+    return row["id"], row["data"], quota_source
 
 
-def refund_nftoken_request(connection, user_id, mode):
+def refund_nftoken_request(connection, user_id, quota_source):
     today = datetime.now().strftime("%Y-%m-%d")
     connection.execute("BEGIN IMMEDIATE")
-    if mode == "vip":
+    if quota_source == "vip":
         connection.execute("UPDATE users SET credits=credits+1 WHERE user_id=?", (user_id,))
+    elif quota_source == "paid_nftoken":
+        connection.execute(
+            "UPDATE users SET nftoken_credits=nftoken_credits+1 WHERE user_id=?",
+            (user_id,),
+        )
     else:
         connection.execute(
             """UPDATE usage SET tokens_used=MAX(0,tokens_used-1)
@@ -521,7 +546,11 @@ def product_dict(row):
         "name": row["name"],
         "price": row["price"],
         "credits": row["credits"],
-        "description": row["description"] or f"Nhận {row['credits']} lượt rút Cookie VIP.",
+        "nftokenCredits": row["nftoken_credits"] or 0,
+        "description": row["description"] or (
+            f"Nhận {row['nftoken_credits'] or 0} lượt tạo NFToken và "
+            f"{row['credits']} lượt lấy Cookie VIP."
+        ),
         "category": row["category"] or "Gói Cookie VIP",
         "imageUrl": row["image_url"] or "",
         "featured": bool(row["featured"]),
@@ -569,7 +598,7 @@ def bootstrap():
     user_id = ensure_user(connection, g.telegram_user)
     connection.commit()
     user = connection.execute(
-        "SELECT balance, credits, plan_name FROM users WHERE user_id=?", (user_id,)
+        "SELECT balance,credits,nftoken_credits,plan_name FROM users WHERE user_id=?", (user_id,)
     ).fetchone()
     spent = connection.execute(
         "SELECT COALESCE(SUM(price), 0) FROM purchase_history WHERE user_id=?",
@@ -598,6 +627,7 @@ def bootstrap():
                 "photoUrl": g.telegram_user.get("photo_url") or "",
                 "balance": user["balance"],
                 "credits": user["credits"],
+                "nftokenCredits": user["nftoken_credits"] or 0,
                 "plan": user["plan_name"],
                 "spent": spent,
                 "orderCount": orders,
@@ -617,7 +647,7 @@ def bootstrap():
 def quota_payload(connection, user_id):
     today = datetime.now().strftime("%Y-%m-%d")
     user = connection.execute(
-        "SELECT plan_name, credits FROM users WHERE user_id=?", (user_id,)
+        "SELECT plan_name,credits,nftoken_credits FROM users WHERE user_id=?", (user_id,)
     ).fetchone()
     plan_name = user["plan_name"] if user else "FREE"
     plan = connection.execute(
@@ -630,6 +660,7 @@ def quota_payload(connection, user_id):
     return {
         "plan": plan_name,
         "credits": user["credits"] if user else 0,
+        "nftokenCredits": user["nftoken_credits"] if user else 0,
         "tokensUsed": usage["tokens_used"] if usage else 0,
         "tokensMax": plan["tokens_max"] if plan else 0,
         "freeCookiesUsed": usage["free_cookies_used"] if usage else 0,
@@ -799,8 +830,11 @@ def checkout():
             )
             order_ids.append(cursor.lastrowid)
             connection.execute(
-                "UPDATE users SET credits=credits+?, plan_name=? WHERE user_id=?",
-                (item["credits"] * item["quantity"], item["name"].upper(), user_id),
+                """UPDATE users SET credits=credits+?,nftoken_credits=nftoken_credits+?,
+                          plan_name=? WHERE user_id=?""",
+                (item["credits"] * item["quantity"],
+                 item["nftokenCredits"] * item["quantity"],
+                 item["name"].upper(), user_id),
             )
             connection.execute("UPDATE store SET purchases=purchases+? WHERE id=?", (item["quantity"], item["id"]))
         connection.execute("DELETE FROM miniapp_cart WHERE user_id=?", (user_id,))
@@ -925,7 +959,7 @@ def free_cookie():
 
 
 def generate_one_nftoken(connection, user_id, mode):
-    cookie_id, cookie_data = reserve_nftoken_request(connection, user_id, mode)
+    cookie_id, cookie_data, quota_source = reserve_nftoken_request(connection, user_id, mode)
     last_error = "Không tìm thấy Cookie hoạt động"
     for attempt in range(5):
         try:
@@ -946,7 +980,7 @@ def generate_one_nftoken(connection, user_id, mode):
                 cookie_id, cookie_data = reserve_cookie(connection)
             except ToolError:
                 break
-    refund_nftoken_request(connection, user_id, mode)
+    refund_nftoken_request(connection, user_id, quota_source)
     raise ToolError(f"Không tạo được NFToken: {last_error}", 409)
 
 
@@ -1156,6 +1190,7 @@ def admin_product_values(body):
     try:
         price = int(body.get("price", 0))
         credits = int(body.get("credits", 0))
+        nftoken_credits = int(body.get("nftokenCredits", 0))
         warranty_days = int(body.get("warrantyDays", 0))
     except (TypeError, ValueError) as error:
         raise ValueError("Giá, lượt và bảo hành phải là số") from error
@@ -1163,12 +1198,12 @@ def admin_product_values(body):
         raise ValueError("Tên sản phẩm phải từ 1 đến 80 ký tự")
     if len(description) > 1000 or not 1 <= len(category) <= 80:
         raise ValueError("Mô tả hoặc danh mục quá dài")
-    if price < 0 or credits < 0 or not 0 <= warranty_days <= 3650:
+    if price < 0 or credits < 0 or nftoken_credits < 0 or not 0 <= warranty_days <= 3650:
         raise ValueError("Thông số sản phẩm không hợp lệ")
     if image_url and not image_url.startswith("https://"):
         raise ValueError("Ảnh sản phẩm phải dùng liên kết HTTPS")
     return (
-        name, price, credits, description, category, image_url,
+        name, price, credits, nftoken_credits, description, category, image_url,
         int(bool(body.get("featured", False))), warranty_days,
         int(bool(body.get("active", True))),
     )
@@ -1186,7 +1221,7 @@ def admin_dashboard():
         term = f"%{query}%"
         user_params = [term, term]
     users = connection.execute(
-        f"""SELECT user_id,username,balance,credits,plan_name,is_banned,last_active
+        f"""SELECT user_id,username,balance,credits,nftoken_credits,plan_name,is_banned,last_active
             FROM users {user_where} ORDER BY last_active DESC LIMIT 50""",
         user_params,
     ).fetchall()
@@ -1271,8 +1306,8 @@ def admin_create_product():
     connection = db()
     cursor = connection.execute(
         """INSERT INTO store
-           (name,price,credits,description,category,image_url,featured,warranty_days,active)
-           VALUES(?,?,?,?,?,?,?,?,?)""",
+           (name,price,credits,nftoken_credits,description,category,image_url,featured,warranty_days,active)
+           VALUES(?,?,?,?,?,?,?,?,?,?)""",
         values,
     )
     admin_audit(connection, "product.create", cursor.lastrowid, values[0])
@@ -1289,7 +1324,7 @@ def admin_update_product(item_id):
         return jsonify({"ok": False, "error": str(error)}), 400
     connection = db()
     updated = connection.execute(
-        """UPDATE store SET name=?,price=?,credits=?,description=?,category=?,image_url=?,
+        """UPDATE store SET name=?,price=?,credits=?,nftoken_credits=?,description=?,category=?,image_url=?,
            featured=?,warranty_days=?,active=? WHERE id=?""",
         (*values, item_id),
     )
@@ -1332,11 +1367,13 @@ def admin_update_user(user_id):
         body = json_body()
         balance = int(body.get("balance", 0))
         credits = int(body.get("credits", 0))
+        nftoken_credits = int(body.get("nftokenCredits", 0))
         plan = str(body.get("plan", "FREE")).strip().upper()
         banned = int(bool(body.get("isBanned", False)))
     except (ValueError, TypeError):
         return jsonify({"ok": False, "error": "Dữ liệu người dùng không hợp lệ"}), 400
-    if balance < 0 or balance > 10**12 or credits < 0 or credits > 10**9 or not plan:
+    if (balance < 0 or balance > 10**12 or credits < 0 or credits > 10**9 or
+            nftoken_credits < 0 or nftoken_credits > 10**9 or not plan):
         return jsonify({"ok": False, "error": "Số dư, lượt hoặc gói không hợp lệ"}), 400
     if user_id == configured_admin_id() and banned:
         return jsonify({"ok": False, "error": "Không thể tự khóa tài khoản Admin"}), 400
@@ -1344,8 +1381,9 @@ def admin_update_user(user_id):
     if not connection.execute("SELECT 1 FROM plans WHERE name=?", (plan,)).fetchone():
         return jsonify({"ok": False, "error": "Gói hạn mức không tồn tại"}), 400
     updated = connection.execute(
-        "UPDATE users SET balance=?,credits=?,plan_name=?,is_banned=? WHERE user_id=?",
-        (balance, credits, plan, banned, user_id),
+        """UPDATE users SET balance=?,credits=?,nftoken_credits=?,plan_name=?,is_banned=?
+           WHERE user_id=?""",
+        (balance, credits, nftoken_credits, plan, banned, user_id),
     )
     if updated.rowcount == 1:
         admin_audit(connection, "user.update", user_id, f"plan={plan},banned={banned}")
@@ -1529,6 +1567,105 @@ def admin_add_inventory(kind):
     admin_audit(connection, "inventory.add", kind, f"added={added},received={len(entries)}")
     connection.commit()
     return jsonify({"ok": True, "added": added, "duplicates": len(entries) - added})
+
+
+def cookie_entries_from_upload(filename, payload):
+    texts = []
+    lower = filename.lower()
+    if lower.endswith(".txt"):
+        texts.append(payload.decode("utf-8", errors="ignore"))
+    elif lower.endswith(".zip"):
+        try:
+            with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+                infos = [item for item in archive.infolist() if not item.is_dir()]
+                if len(infos) > 200:
+                    raise ValueError("ZIP vượt quá 200 file")
+                if any(item.flag_bits & 1 for item in infos):
+                    raise ValueError("ZIP có file đặt mật khẩu")
+                if sum(item.file_size for item in infos) > 50 * 1024 * 1024:
+                    raise ValueError("ZIP vượt quá 50MB sau giải nén")
+                txt_files = [item for item in infos if item.filename.lower().endswith(".txt")]
+                if not txt_files:
+                    raise ValueError("ZIP không chứa file .txt")
+                for item in txt_files:
+                    if item.file_size > 5 * 1024 * 1024:
+                        raise ValueError(f"File {os.path.basename(item.filename)} vượt quá 5MB")
+                    texts.append(archive.read(item).decode("utf-8", errors="ignore"))
+        except zipfile.BadZipFile as error:
+            raise ValueError("File ZIP bị lỗi") from error
+    else:
+        raise ValueError("Chỉ hỗ trợ file .txt hoặc .zip")
+
+    from code_goc import checker
+
+    entries = []
+    seen = set()
+    for text in texts:
+        for cookies in checker.extract_cookies_from_text(text):
+            netflix_id = cookies.get("NetflixId", "")
+            secure_id = cookies.get("SecureNetflixId", "")
+            key = (netflix_id, secure_id)
+            if not netflix_id or key in seen:
+                continue
+            seen.add(key)
+            entries.append(checker.build_netscape_format(cookies))
+            if len(entries) > 100:
+                raise ValueError("Mỗi lần chỉ kiểm tra tối đa 100 Cookie")
+    if not entries:
+        raise ValueError("Không tìm thấy Cookie Netflix hợp lệ trong file")
+    return entries
+
+
+@app.post("/api/admin/inventory/<kind>/upload")
+@admin_required
+def admin_upload_inventory(kind):
+    table = {"premium": "premium_cookies", "free": "free_cookies"}.get(kind)
+    if not table:
+        return jsonify({"ok": False, "error": "Loại kho không hợp lệ"}), 400
+    uploaded = request.files.get("file")
+    if not uploaded or not uploaded.filename:
+        return jsonify({"ok": False, "error": "Vui lòng chọn file .txt hoặc .zip"}), 400
+    payload = uploaded.read(10 * 1024 * 1024 + 1)
+    if not payload or len(payload) > 10 * 1024 * 1024:
+        return jsonify({"ok": False, "error": "File trống hoặc vượt quá 10MB"}), 400
+    try:
+        entries = cookie_entries_from_upload(os.path.basename(uploaded.filename), payload)
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+
+    live_entries = []
+    dead = 0
+    with ThreadPoolExecutor(max_workers=min(6, len(entries))) as executor:
+        futures = {executor.submit(run_cookie_check, entry): entry for entry in entries}
+        for future in as_completed(futures):
+            try:
+                success, token, _error, account, _netscape = future.result()
+                if success and token and account.get("membership_status") == "CURRENT_MEMBER":
+                    live_entries.append(futures[future])
+                else:
+                    dead += 1
+            except Exception:
+                app.logger.exception("Uploaded Cookie live check failed")
+                dead += 1
+
+    connection = db()
+    added = 0
+    duplicates = 0
+    for entry in live_entries:
+        if connection.execute(f"SELECT 1 FROM {table} WHERE data=? LIMIT 1", (entry,)).fetchone():
+            duplicates += 1
+            continue
+        connection.execute(f"INSERT INTO {table}(data,is_used) VALUES(?,0)", (entry,))
+        added += 1
+    admin_audit(
+        connection, "inventory.upload", kind,
+        f"checked={len(entries)},live={len(live_entries)},added={added},dead={dead},duplicates={duplicates}",
+    )
+    connection.commit()
+    return jsonify({
+        "ok": True, "checked": len(entries), "live": len(live_entries),
+        "added": added, "dead": dead, "duplicates": duplicates,
+    })
 
 
 @app.post("/api/admin/inventory/<kind>/cleanup")

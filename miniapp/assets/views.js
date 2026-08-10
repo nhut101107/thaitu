@@ -14,7 +14,7 @@ export function homeView() {
   return `<div class="page home-page">
     <div class="eyebrow">CHÀO MỪNG TRỞ LẠI</div><div class="welcome"><h1>Xin chào, ${escapeHtml(user.firstName)}<i>✦</i></h1><span>${escapeHtml(user.plan)}</span></div>
     ${state.bootstrap.announcement ? `<div class="announcement-banner"><i>📣</i><p><b>Thông báo từ Admin</b><span>${escapeHtml(state.bootstrap.announcement)}</span></p></div>` : ""}
-    <section class="balance-card"><div><small>SỐ DƯ KHẢ DỤNG</small><strong>${formatMoney(user.balance)}</strong></div><span>${user.credits} lượt Cookie VIP</span><hr><div class="balance-foot"><p>Tổng chi tiêu<b>${formatMoney(user.spent)}</b></p><button data-action="deposit">${icon("plus")} Nạp tiền</button></div></section>
+    <section class="balance-card"><div><small>SỐ DƯ KHẢ DỤNG</small><strong>${formatMoney(user.balance)}</strong></div><span>⚡ ${user.nftokenCredits || 0} lượt NFToken · 🍪 ${user.credits} lượt Cookie VIP</span><hr><div class="balance-foot"><p>Tổng chi tiêu<b>${formatMoney(user.spent)}</b></p><button data-action="deposit">${icon("plus")} Nạp tiền</button></div></section>
     <div class="quick-grid">
       <button data-route="store"><i class="purple">${icon("store")}</i><b>Cửa hàng</b><small>Mua gói lượt Cookie</small>${icon("arrow")}</button>
       <button data-route="orders"><i class="blue">${icon("orders")}</i><b>Đơn hàng</b><small>${user.orderCount} đơn đã mua</small>${icon("arrow")}</button>
@@ -51,7 +51,7 @@ export function toolsView() {
   const flags = state.tools?.features || state.bootstrap.features || {};
   const tools = [
     ["📺", "Đăng nhập Netflix TV", "Nhập mã TV và xử lý ngay trong app", "tv", flags.tv],
-    ["⚡", "Tạo NFToken theo gói", `${quota.tokensUsed || 0}/${quota.tokensMax || 0} lượt hôm nay`, "plan-token", flags.planToken],
+    ["⚡", "Tạo link NFToken", `${quota.nftokenCredits || 0} lượt đã mua · ${Math.max(0,(quota.tokensMax || 0)-(quota.tokensUsed || 0))} lượt gói/ngày`, "plan-token", flags.planToken],
     ["🍪", "Rút Cookie VIP", `${quota.credits || 0} lượt đã mua`, "vip-token", flags.vipToken],
     ["🎁", "Cookie miễn phí", `${quota.freeCookiesUsed || 0}/${quota.freeCookiesMax || 0} lượt hôm nay`, "free-cookie", flags.freeCookie],
     ["🎟", "Nhập mã quà tặng", "Cộng số dư trực tiếp", "giftcode", flags.giftcode],
@@ -67,7 +67,7 @@ export function accountView() {
   const initials = escapeHtml((user.firstName || "N")[0]);
   const avatar = user.photoUrl ? `<img src="${escapeHtml(user.photoUrl)}" alt="">` : initials;
   return `<div class="page account-page"><div class="profile-hero"><div class="profile-avatar">${avatar}</div><h1>${escapeHtml(`${user.firstName} ${user.lastName}`.trim())}</h1><p>${user.username ? `@${escapeHtml(user.username)}` : "Chưa đặt username"}</p><span>♕ ${escapeHtml(user.plan)}</span></div>
-    <section class="panel account-list"><header><h2>Tài khoản</h2><small>An toàn & bảo mật</small></header><button data-action="deposit"><i>${icon("wallet")}</i><span><b>Số dư ví</b><small>${formatMoney(user.balance)} · Chạm để nạp</small></span>${icon("arrow")}</button><button data-route="orders"><i>${icon("orders")}</i><span><b>Lịch sử đơn hàng</b><small>${user.orderCount} đơn đã mua</small></span>${icon("arrow")}</button><button data-action="support"><i>${icon("account")}</i><span><b>Hỗ trợ trực tiếp</b><small>Gửi yêu cầu ngay trong app</small></span>${icon("arrow")}</button></section>
+    <section class="panel account-list"><header><h2>Tài khoản</h2><small>An toàn & bảo mật</small></header><button data-action="deposit"><i>${icon("wallet")}</i><span><b>Số dư ví</b><small>${formatMoney(user.balance)} · Chạm để nạp</small></span>${icon("arrow")}</button><button><i>⚡</i><span><b>Lượt tạo link NFToken</b><small>${user.nftokenCredits || 0} lượt đã mua</small></span></button><button><i>🍪</i><span><b>Lượt lấy Cookie VIP</b><small>${user.credits} lượt đã mua</small></span></button><button data-route="orders"><i>${icon("orders")}</i><span><b>Lịch sử đơn hàng</b><small>${user.orderCount} đơn đã mua</small></span>${icon("arrow")}</button><button data-action="support"><i>${icon("account")}</i><span><b>Hỗ trợ trực tiếp</b><small>Gửi yêu cầu ngay trong app</small></span>${icon("arrow")}</button></section>
     ${state.bootstrap.isAdmin ? `<button class="admin-entry" data-route="admin"><i>♛</i><span><b>Trung tâm quản trị</b><small>Quản lý toàn bộ hệ thống ngay trong Mini App</small></span>${icon("arrow")}</button>` : ""}
     <section class="panel commitments"><header><h2>Chính sách & cam kết</h2></header><p>♢ <span><b>Minh bạch gói dịch vụ</b><small>Thông tin lượt và giá được đọc trực tiếp từ hệ thống.</small></span></p><p>⚡ <span><b>Giao lượt tức thì</b><small>Lượt Cookie được cộng sau khi giao dịch thành công.</small></span></p><p>▣ <span><b>Chỉ xử lý sau thanh toán</b><small>Backend kiểm tra lại giá và số dư trong một transaction.</small></span></p></section>
     <section class="panel membership"><h2>Hạng ${escapeHtml(user.plan)}</h2><p>Telegram ID: ${user.id}</p><div><i style="width:${Math.min(100, user.spent / 10000)}%"></i></div></section></div>`;
@@ -76,7 +76,7 @@ export function accountView() {
 export async function openProduct(id) {
   try {
     const {item} = await api.product(id);
-    modal(`<div class="detail-image">${item.imageUrl ? `<img src="${escapeHtml(item.imageUrl)}" alt="">` : '<span class="brand-mark">N</span>'}</div><div class="eyebrow">${escapeHtml(item.category)}</div><h2>${escapeHtml(item.name)}</h2><p>${escapeHtml(item.description)}</p><dl><div><dt>Giá</dt><dd>${formatMoney(item.price)}</dd></div><div><dt>Quyền lợi</dt><dd>${item.credits} lượt Cookie VIP</dd></div><div><dt>Bảo hành</dt><dd>${item.warrantyDays ? `${item.warrantyDays} ngày` : "Không áp dụng"}</dd></div></dl><button class="button wide" data-modal-add="${item.id}">Thêm vào giỏ · ${formatMoney(item.price)}</button>`, {onOpen(root, close) { root.querySelector("[data-modal-add]").onclick = async () => { await addToCart(item.id); close(); }; }});
+    modal(`<div class="detail-image">${item.imageUrl ? `<img src="${escapeHtml(item.imageUrl)}" alt="">` : '<span class="brand-mark">N</span>'}</div><div class="eyebrow">${escapeHtml(item.category)}</div><h2>${escapeHtml(item.name)}</h2><p>${escapeHtml(item.description)}</p><dl><div><dt>Giá</dt><dd>${formatMoney(item.price)}</dd></div><div><dt>⚡ Tạo link NFToken</dt><dd>${item.nftokenCredits || 0} lượt</dd></div><div><dt>🍪 Lấy Cookie VIP</dt><dd>${item.credits} lượt</dd></div><div><dt>Bảo hành</dt><dd>${item.warrantyDays ? `${item.warrantyDays} ngày` : "Không áp dụng"}</dd></div></dl><button class="button wide" data-modal-add="${item.id}">Thêm vào giỏ · ${formatMoney(item.price)}</button>`, {onOpen(root, close) { root.querySelector("[data-modal-add]").onclick = async () => { await addToCart(item.id); close(); }; }});
   } catch (error) { toast(error.message, "error"); }
 }
 
@@ -114,6 +114,7 @@ function syncQuota(quota) {
   state.tools = {...(state.tools || {}), quota};
   state.bootstrap.quota = quota;
   state.bootstrap.user.credits = quota.credits;
+  state.bootstrap.user.nftokenCredits = quota.nftokenCredits;
 }
 
 function busyButton(button, text = "Đang xử lý...") {

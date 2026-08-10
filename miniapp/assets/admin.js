@@ -15,6 +15,13 @@ function adminRows(items, renderer, emptyText) {
   return items?.length ? `<div class="admin-list">${items.map(renderer).join("")}</div>` : emptyState("Chưa có dữ liệu", emptyText);
 }
 
+function busyButton(button, text) {
+  const old = button.textContent;
+  button.disabled = true;
+  button.textContent = text;
+  return () => { button.disabled = false; button.textContent = old; };
+}
+
 export function adminView() {
   if (!state.bootstrap?.isAdmin) return `<div class="page">${emptyState("Không có quyền", "Khu vực này chỉ dành cho Admin.")}</div>`;
   const data = state.admin;
@@ -36,7 +43,7 @@ export function adminView() {
 
     <details class="admin-section"><summary><span><i>📦</i><b>Quản lý kho Cookie</b><small>Premium ${s.premiumStock} · Free ${s.freeStock}</small></span><em>⌄</em></summary><div class="admin-section-body"><div class="inventory-cards"><article><b>Premium</b><small>${s.premiumStock} khả dụng · ${s.premiumUsed} đã dùng</small><button data-admin-inventory="premium">Thêm vào kho</button><button class="clean" data-admin-cleanup="premium">Dọn mục đã dùng</button></article><article><b>Free</b><small>${s.freeStock} khả dụng · ${s.freeUsed} đã dùng</small><button data-admin-inventory="free">Thêm vào kho</button><button class="clean" data-admin-cleanup="free">Dọn mục đã dùng</button></article></div><p class="admin-note">Dữ liệu Cookie chỉ được ghi vào SQLite, không có API đọc ngược nội dung ra giao diện.</p></div></details>
 
-    <details class="admin-section" open><summary><span><i>🛍</i><b>Sản phẩm cửa hàng</b><small>${data.products.length} sản phẩm</small></span><em>⌄</em></summary><div class="admin-section-body"><button class="button admin-add" data-admin-product-new>＋ Thêm sản phẩm</button>${adminRows(data.products, (item) => `<article class="admin-row"><div><b>${escapeHtml(item.name)}</b><small>${formatMoney(item.price)} · ${item.credits} lượt · ${item.available ? "Đang bán" : "Đã ẩn"}</small></div><button data-admin-product="${item.id}">Sửa</button></article>`, "Hãy tạo sản phẩm đầu tiên.")}</div></details>
+    <details class="admin-section" open><summary><span><i>🛍</i><b>Sản phẩm cửa hàng</b><small>${data.products.length} sản phẩm</small></span><em>⌄</em></summary><div class="admin-section-body"><button class="button admin-add" data-admin-product-new>＋ Thêm sản phẩm</button>${adminRows(data.products, (item) => `<article class="admin-row"><div><b>${escapeHtml(item.name)}</b><small>${formatMoney(item.price)} · ⚡ ${item.nftokenCredits || 0} lượt NFToken · 🍪 ${item.credits} lượt Cookie VIP · ${item.available ? "Đang bán" : "Đã ẩn"}</small></div><button data-admin-product="${item.id}">Sửa</button></article>`, "Hãy tạo sản phẩm đầu tiên.")}</div></details>
 
     <details class="admin-section"><summary><span><i>⚡</i><b>Gói & hạn mức chức năng</b><small>NFToken và Cookie miễn phí mỗi ngày</small></span><em>⌄</em></summary><div class="admin-section-body"><button class="button admin-add" data-admin-plan-new>＋ Tạo gói hạn mức</button>${adminRows(data.plans, (plan) => `<article class="admin-row"><div><b>${escapeHtml(plan.name)}</b><small>${plan.tokens_max} NFToken/ngày · ${plan.cookies_max} Cookie/ngày</small></div><button data-admin-plan="${escapeHtml(plan.name)}">Sửa</button></article>`, "Chưa có gói hạn mức.")}</div></details>
 
@@ -44,7 +51,7 @@ export function adminView() {
 
     <details class="admin-section"><summary><span><i>🧾</i><b>Quản lý đơn hàng</b><small>${data.orders.length} đơn gần nhất</small></span><em>⌄</em></summary><div class="admin-section-body">${adminRows(data.orders, (order) => `<article class="admin-row"><div><b>#${order.id} · ${escapeHtml(order.plan_name)}</b><small>ID ${order.user_id} · ${formatMoney(order.price)} · ${escapeHtml(order.status || "COMPLETED")} · ${escapeHtml(order.date)}</small></div><button data-admin-order="${order.id}">Sửa</button></article>`, "Chưa có đơn hàng.")}</div></details>
 
-    <details class="admin-section"><summary><span><i>👤</i><b>Quản lý người dùng</b><small>Số dư, lượt, gói và khóa tài khoản</small></span><em>⌄</em></summary><div class="admin-section-body"><form class="admin-search" data-admin-search><input name="q" placeholder="Nhập Telegram ID hoặc username"><button>Tìm</button></form>${adminRows(data.users, (user) => `<article class="admin-row"><div><b>${user.username ? `@${escapeHtml(user.username)}` : "Không username"}</b><small>ID ${user.user_id} · ${formatMoney(user.balance)} · ${user.credits} lượt · ${escapeHtml(user.plan_name)}${user.is_banned ? " · ĐÃ KHÓA" : ""}</small></div><button data-admin-user="${user.user_id}">Sửa</button></article>`, "Không tìm thấy người dùng.")}</div></details>
+    <details class="admin-section"><summary><span><i>👤</i><b>Quản lý người dùng</b><small>Số dư, lượt, gói và khóa tài khoản</small></span><em>⌄</em></summary><div class="admin-section-body"><form class="admin-search" data-admin-search><input name="q" placeholder="Nhập Telegram ID hoặc username"><button>Tìm</button></form>${adminRows(data.users, (user) => `<article class="admin-row"><div><b>${user.username ? `@${escapeHtml(user.username)}` : "Không username"}</b><small>ID ${user.user_id} · ${formatMoney(user.balance)} · ⚡ ${user.nftoken_credits || 0} NFToken · 🍪 ${user.credits} VIP · ${escapeHtml(user.plan_name)}${user.is_banned ? " · ĐÃ KHÓA" : ""}</small></div><button data-admin-user="${user.user_id}">Sửa</button></article>`, "Không tìm thấy người dùng.")}</div></details>
 
     <details class="admin-section"><summary><span><i>🎟</i><b>Mã quà tặng</b><small>Tạo và cập nhật giftcode</small></span><em>⌄</em></summary><div class="admin-section-body"><button class="button admin-add" data-admin-code-new>＋ Tạo giftcode</button>${adminRows(data.codes, (code) => `<article class="admin-row"><div><b>${escapeHtml(code.code)}</b><small>${formatMoney(code.amount)} · còn ${code.uses} lượt</small></div><button data-admin-code="${escapeHtml(code.code)}">Sửa</button></article>`, "Chưa có giftcode.")}</div></details>
 
@@ -57,7 +64,8 @@ export function adminView() {
 function productDialog(item = null) {
   modal(`<div class="eyebrow">QUẢN LÝ CỬA HÀNG</div><h2>${item ? "Sửa sản phẩm" : "Thêm sản phẩm"}</h2><form data-product-form>
     <label class="field">Tên sản phẩm<input name="name" maxlength="80" value="${escapeHtml(item?.name || "")}" required></label>
-    <div class="field-pair"><label class="field">Giá bán<input name="price" type="number" min="0" value="${item?.price || 0}" required></label><label class="field">Lượt VIP<input name="credits" type="number" min="0" value="${item?.credits || 0}" required></label></div>
+    <label class="field">Giá bán<input name="price" type="number" min="0" value="${item?.price || 0}" required></label>
+    <div class="field-pair"><label class="field">⚡ Lượt tạo link NFToken<input name="nftokenCredits" type="number" min="0" value="${item?.nftokenCredits || 0}" required></label><label class="field">🍪 Lượt lấy Cookie VIP<input name="credits" type="number" min="0" value="${item?.credits || 0}" required></label></div>
     <label class="field">Danh mục<input name="category" maxlength="80" value="${escapeHtml(item?.category || "Gói Cookie VIP")}" required></label>
     <label class="field">Mô tả<textarea name="description" maxlength="1000">${escapeHtml(item?.description || "")}</textarea></label>
     <label class="field">Link ảnh HTTPS<input name="imageUrl" type="url" value="${escapeHtml(item?.imageUrl || "")}" placeholder="https://..."></label>
@@ -66,7 +74,7 @@ function productDialog(item = null) {
     <button class="button wide">${item ? "Lưu thay đổi" : "Tạo sản phẩm"}</button></form>`, {onOpen(root, close) {
       root.querySelector("[data-product-form]").onsubmit = async (event) => {
         event.preventDefault(); const form = new FormData(event.currentTarget);
-        const value = {name: form.get("name"), price: Number(form.get("price")), credits: Number(form.get("credits")), category: form.get("category"), description: form.get("description"), imageUrl: form.get("imageUrl"), warrantyDays: Number(form.get("warrantyDays")), featured: form.has("featured"), active: form.has("active")};
+        const value = {name: form.get("name"), price: Number(form.get("price")), nftokenCredits: Number(form.get("nftokenCredits")), credits: Number(form.get("credits")), category: form.get("category"), description: form.get("description"), imageUrl: form.get("imageUrl"), warrantyDays: Number(form.get("warrantyDays")), featured: form.has("featured"), active: form.has("active")};
         try { item ? await api.adminUpdateProduct(item.id, value) : await api.adminCreateProduct(value); close(); await loadAdmin(); toast("Đã lưu sản phẩm"); } catch (error) { toast(error.message, "error"); }
       };
     }});
@@ -78,7 +86,7 @@ function planDialog(plan = null) {
 
 function userDialog(user) {
   const options = state.admin.plans.map((plan) => `<option value="${escapeHtml(plan.name)}" ${plan.name === user.plan_name ? "selected" : ""}>${escapeHtml(plan.name)}</option>`).join("");
-  modal(`<div class="eyebrow">USER ID ${user.user_id}</div><h2>${user.username ? `@${escapeHtml(user.username)}` : "Người dùng"}</h2><form data-user-form><label class="field">Số dư<input name="balance" type="number" min="0" value="${user.balance}" required></label><label class="field">Lượt Cookie VIP<input name="credits" type="number" min="0" value="${user.credits}" required></label><label class="field">Gói hạn mức<select name="plan">${options}</select></label><label class="danger-check"><input name="banned" type="checkbox" ${user.is_banned ? "checked" : ""}> Khóa tài khoản này</label><button class="button wide">Lưu tài khoản</button></form>`, {onOpen(root, close) { root.querySelector("[data-user-form]").onsubmit = async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); try { await api.adminUpdateUser(user.user_id, {balance: Number(form.get("balance")), credits: Number(form.get("credits")), plan: form.get("plan"), isBanned: form.has("banned")}); close(); await loadAdmin(); toast("Đã cập nhật người dùng"); } catch (error) { toast(error.message, "error"); } }; }});
+  modal(`<div class="eyebrow">USER ID ${user.user_id}</div><h2>${user.username ? `@${escapeHtml(user.username)}` : "Người dùng"}</h2><form data-user-form><label class="field">Số dư<input name="balance" type="number" min="0" value="${user.balance}" required></label><div class="field-pair"><label class="field">Lượt tạo NFToken<input name="nftokenCredits" type="number" min="0" value="${user.nftoken_credits || 0}" required></label><label class="field">Lượt Cookie VIP<input name="credits" type="number" min="0" value="${user.credits}" required></label></div><label class="field">Gói hạn mức<select name="plan">${options}</select></label><label class="danger-check"><input name="banned" type="checkbox" ${user.is_banned ? "checked" : ""}> Khóa tài khoản này</label><button class="button wide">Lưu tài khoản</button></form>`, {onOpen(root, close) { root.querySelector("[data-user-form]").onsubmit = async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); try { await api.adminUpdateUser(user.user_id, {balance: Number(form.get("balance")), nftokenCredits: Number(form.get("nftokenCredits")), credits: Number(form.get("credits")), plan: form.get("plan"), isBanned: form.has("banned")}); close(); await loadAdmin(); toast("Đã cập nhật người dùng"); } catch (error) { toast(error.message, "error"); } }; }});
 }
 
 function codeDialog(code = null) {
@@ -96,7 +104,12 @@ function replyDialog(ticket) {
 
 function inventoryDialog(kind) {
   const label = kind === "premium" ? "Premium" : "Free";
-  modal(`<div class="eyebrow">KHO ${label.toUpperCase()}</div><h2>Thêm Cookie vào kho</h2><p>Một mục có thể gồm nhiều dòng Netscape. Nếu thêm nhiều mục cùng lúc, đặt một dòng <code>---</code> giữa các mục.</p><form data-inventory-form><label class="field">Dữ liệu<textarea name="data" maxlength="60000" required placeholder="NetflixId=...\n---\nNetflixId=..."></textarea></label><button class="button wide">Thêm an toàn vào kho</button></form>`, {onOpen(root, close) { root.querySelector("[data-inventory-form]").onsubmit = async (event) => { event.preventDefault(); const data = new FormData(event.currentTarget).get("data"); try { const result = await api.adminAddInventory(kind, data); close(); await loadAdmin(); toast(`Đã thêm ${result.added} mục, bỏ qua ${result.duplicates} mục trùng`); } catch (error) { toast(error.message, "error"); } }; }});
+  modal(`<div class="eyebrow">KHO ${label.toUpperCase()}</div><h2>Tải và lọc Cookie live</h2><div class="upload-zone"><span>📁</span><b>Chọn file .txt hoặc .zip</b><small>ZIP tối đa 10MB · tối đa 100 Cookie · chỉ đọc các file TXT</small><input type="file" name="file" accept=".txt,.zip,text/plain,application/zip" data-cookie-file></div><button class="button wide" data-upload-cookies>Kiểm tra live & lưu vào kho</button><div class="upload-progress hidden" data-upload-progress><i></i><b>Đang kiểm tra Cookie...</b><small>Giữ Mini App mở, quá trình có thể mất vài phút.</small></div><details class="manual-cookie"><summary>Hoặc nhập thủ công</summary><form data-inventory-form><label class="field">Dữ liệu<textarea name="data" maxlength="60000" required placeholder="NetflixId=...\n---\nNetflixId=..."></textarea></label><button class="button wide">Thêm không kiểm tra live</button></form></details>`, {onOpen(root, close) {
+    const input = root.querySelector("[data-cookie-file]");
+    input.onchange = () => { if (input.files[0]) root.querySelector(".upload-zone b").textContent = input.files[0].name; };
+    root.querySelector("[data-upload-cookies]").onclick = async (event) => { const file = input.files[0]; if (!file) return toast("Hãy chọn file TXT hoặc ZIP", "error"); const done = busyButton(event.currentTarget, "Đang lọc Cookie live..."); root.querySelector("[data-upload-progress]").classList.remove("hidden"); try { const result = await api.adminUploadInventory(kind, file); close(); await loadAdmin(); toast(`Đã kiểm tra ${result.checked}: thêm ${result.added} live, ${result.dead} lỗi, ${result.duplicates} trùng`); } catch (error) { toast(error.message, "error"); root.querySelector("[data-upload-progress]").classList.add("hidden"); done(); } };
+    root.querySelector("[data-inventory-form]").onsubmit = async (event) => { event.preventDefault(); const data = new FormData(event.currentTarget).get("data"); try { const result = await api.adminAddInventory(kind, data); close(); await loadAdmin(); toast(`Đã thêm ${result.added} mục, bỏ qua ${result.duplicates} mục trùng`); } catch (error) { toast(error.message, "error"); } };
+  }});
 }
 
 function orderDialog(order) {

@@ -17,6 +17,10 @@ Các chức năng người dùng của bot hiện chạy trực tiếp trong Min
 
 Telegram ID trong `TELEGRAM_ADMIN_ID` có thêm Trung tâm quản trị riêng ngay trong Mini App. Admin có thể quản lý sản phẩm, giá, lượt, bảo hành và trạng thái bán; cấu hình hạn mức NFToken/Cookie của từng gói; cập nhật số dư, lượt, gói và trạng thái khóa của người dùng; duyệt hoặc từ chối nạp tiền; quản lý giftcode, đơn hàng và yêu cầu hỗ trợ; bật chế độ bảo trì, đăng thông báo, bật/tắt từng chức năng và bổ sung kho Cookie Premium/Free. Nhật ký quản trị lưu 100 thao tác gần nhất. Giao diện kho chỉ cho phép ghi thêm và dọn mục đã dùng, không có API đọc ngược nội dung Cookie. Mọi API `/api/admin/*` đều xác thực chữ ký Telegram và kiểm tra lại Admin ID ở backend; việc ẩn nút trên frontend không được dùng làm lớp bảo mật.
 
+Mỗi sản phẩm có hai quyền lợi tách biệt: `nftoken_credits` là số lượt tạo link NFToken đã mua và `credits` là số lượt lấy Cookie VIP. Checkout cộng hai loại lượt trong cùng transaction. Khi tạo NFToken, hệ thống ưu tiên dùng lượt đã mua; nếu hết mới dùng hạn mức hằng ngày của gói. Nếu kiểm tra Cookie thất bại, đúng loại lượt vừa dùng sẽ được hoàn lại.
+
+Admin có thể tải file `.txt` hoặc `.zip` vào kho. Backend chỉ đọc file TXT trong ZIP, không giải nén ra filesystem, chặn ZIP mã hóa/ZIP bomb, giới hạn 10MB và tối đa 100 Cookie. Cookie được kiểm tra song song và chỉ tài khoản `CURRENT_MEMBER` tạo được NFToken mới được lưu; giao diện trả về tổng đã kiểm tra, live, lỗi và trùng.
+
 ## Chạy local
 
 ```bash

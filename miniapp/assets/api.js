@@ -9,10 +9,11 @@ export class ApiError extends Error {
 }
 
 async function request(path, options = {}) {
+  const isForm = options.body instanceof FormData;
   const response = await fetch(path, {
     ...options,
     headers: {
-      "Content-Type": "application/json",
+      ...(isForm ? {} : {"Content-Type": "application/json"}),
       "X-Telegram-Init-Data": tg?.initData || "",
       ...(options.headers || {}),
     },
@@ -53,6 +54,7 @@ export const api = {
   adminReplySupport: (id, message) => request(`/api/admin/support/${id}/reply`, {method: "POST", body: JSON.stringify({message})}),
   adminSaveSettings: (value) => request("/api/admin/settings", {method: "PUT", body: JSON.stringify(value)}),
   adminAddInventory: (kind, data) => request(`/api/admin/inventory/${kind}`, {method: "POST", body: JSON.stringify({data})}),
+  adminUploadInventory: (kind, file) => { const body = new FormData(); body.append("file", file); return request(`/api/admin/inventory/${kind}/upload`, {method: "POST", body}); },
   adminCleanupInventory: (kind) => request(`/api/admin/inventory/${kind}/cleanup`, {method: "POST", body: "{}"}),
   adminUpdateOrder: (id, value) => request(`/api/admin/orders/${id}`, {method: "PUT", body: JSON.stringify(value)}),
 };

@@ -1,11 +1,13 @@
 import hashlib
 import hmac
+import io
 import json
 import os
 import sqlite3
 import tempfile
 import time
 import unittest
+import zipfile
 from unittest.mock import patch
 from urllib.parse import urlencode
 
@@ -76,6 +78,35 @@ class MiniAppTest(unittest.TestCase):
         self.assertEqual(connection.execute("SELECT COUNT(*) FROM purchase_history WHERE user_id=1").fetchone()[0], 1)
         connection.close()
 
+    def test_product_grants_nftoken_and_cookie_vip_credits_separately(self):
+        product = self.client.post(
+            "/api/admin/products",
+            json={"name": "COMBO", "price": 30000, "nftokenCredits": 7,
+                  "credits": 3, "category": "COMBO", "active": True},
+            headers=self.headers,
+        )
+        self.assertEqual(product.status_code, 200)
+        product_id = product.json["id"]
+        self.assertEqual(
+            self.client.put(
+                f"/api/cart/{product_id}", json={"quantity": 2}, headers=self.headers
+            ).status_code,
+            200,
+        )
+        checkout = self.client.post(
+            "/api/checkout", json={"idempotencyKey": "combo_checkout_123456"},
+            headers=self.headers,
+        )
+        self.assertEqual(checkout.status_code, 200)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        self.assertEqual(
+            connection.execute(
+                "SELECT nftoken_credits,credits FROM users WHERE user_id=1"
+            ).fetchone(),
+            (14, 6),
+        )
+        connection.close()
+
     def test_order_ownership_is_enforced(self):
         connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
         cursor = connection.execute("INSERT INTO purchase_history(user_id,plan_name,price,date) VALUES(2,'Private',1,'2026-01-01')")
@@ -137,6 +168,24 @@ class MiniAppTest(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
         self.assertEqual(connection.execute("SELECT credits FROM users WHERE user_id=1").fetchone()[0], 1)
+        connection.close()
+
+    def test_failed_paid_nftoken_refunds_nftoken_credit(self):
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute("UPDATE users SET nftoken_credits=1 WHERE user_id=1")
+        connection.execute("INSERT INTO premium_cookies(data) VALUES('NetflixId=dead-paid')")
+        connection.commit()
+        connection.close()
+        with patch.object(miniapp_server, "run_cookie_check", return_value=(False, None, "dead", {}, None)):
+            response = self.client.post(
+                "/api/tools/nftoken", json={"mode": "plan", "quantity": 1}, headers=self.headers
+            )
+        self.assertEqual(response.status_code, 409)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        self.assertEqual(
+            connection.execute("SELECT nftoken_credits FROM users WHERE user_id=1").fetchone()[0],
+            1,
+        )
         connection.close()
 
     def test_giftcode_deposit_and_support_are_direct(self):
@@ -332,6 +381,36 @@ class MiniAppTest(unittest.TestCase):
         )
         self.assertEqual(normal.status_code, 503)
         self.assertEqual(self.client.get("/api/bootstrap", headers=self.headers).status_code, 200)
+
+    def test_admin_uploads_zip_filters_txt_and_only_saves_live_cookies(self):
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as zipped:
+            zipped.writestr("live.txt", "NetflixId=live-cookie")
+            zipped.writestr("dead.txt", "NetflixId=dead-cookie")
+            zipped.writestr("ignored.json", "{}")
+        archive.seek(0)
+
+        def check_cookie(entry):
+            if "live-cookie" in entry:
+                return True, "token", None, {"membership_status": "CURRENT_MEMBER"}, "netscape"
+            return False, None, "dead", {}, None
+
+        with patch.object(miniapp_server, "run_cookie_check", side_effect=check_cookie):
+            response = self.client.post(
+                "/api/admin/inventory/premium/upload",
+                data={"file": (archive, "cookies.zip")},
+                content_type="multipart/form-data",
+                headers=self.headers,
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["checked"], 2)
+        self.assertEqual(response.json["live"], 1)
+        self.assertEqual(response.json["dead"], 1)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        saved = connection.execute("SELECT data FROM premium_cookies").fetchall()
+        self.assertEqual(len(saved), 1)
+        self.assertIn("live-cookie", saved[0][0])
+        connection.close()
 
 
 if __name__ == "__main__":
