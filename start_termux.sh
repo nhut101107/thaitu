@@ -6,7 +6,6 @@ LOG_DIR="$APP_DIR/logs"
 RUN_DIR="$APP_DIR/.run"
 MINIAPP_PORT="${MINIAPP_PORT:-8080}"
 TUNNEL_MODE="${TUNNEL_MODE:-quick}"
-CLOUDFLARE_HOSTNAME="${CLOUDFLARE_HOSTNAME:-}"
 CLOUDFLARE_TUNNEL_TOKEN="${CLOUDFLARE_TUNNEL_TOKEN:-}"
 
 mkdir -p "$LOG_DIR" "$RUN_DIR"
@@ -17,6 +16,11 @@ if [ -f .env ]; then
   # shellcheck disable=SC1091
   . ./.env
   set +a
+fi
+
+if [ -f .venv/bin/activate ]; then
+  # shellcheck disable=SC1091
+  . .venv/bin/activate
 fi
 
 need_cmd() {
