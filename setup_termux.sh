@@ -25,6 +25,7 @@ pip install -r requirements.txt
 
 if [ ! -f .env ]; then
   cp .env.example .env
+  sed -i "s|BOT_DATABASE_PATH=/absolute/path/to/bot_database.db|BOT_DATABASE_PATH=$APP_DIR/bot_database.db|" .env
   echo
   echo "Đã tạo $APP_DIR/.env"
   echo "Hãy sửa TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_ID và thông tin VietQR trước khi chạy."
