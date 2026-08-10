@@ -8,6 +8,7 @@ import sqlite3
 import threading
 import time
 import zipfile
+import rarfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from functools import wraps
@@ -31,7 +32,7 @@ MIGRATION_LOCK = threading.Lock()
 MIGRATED_PATHS = set()
 
 app = Flask(__name__, static_folder=None)
-app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
 
 
 def db():
@@ -1578,23 +1579,39 @@ def cookie_entries_from_upload(filename, payload):
         try:
             with zipfile.ZipFile(io.BytesIO(payload)) as archive:
                 infos = [item for item in archive.infolist() if not item.is_dir()]
-                if len(infos) > 200:
-                    raise ValueError("ZIP vượt quá 200 file")
+                if len(infos) > 5000:
+                    raise ValueError("ZIP vượt quá 5000 file")
                 if any(item.flag_bits & 1 for item in infos):
                     raise ValueError("ZIP có file đặt mật khẩu")
-                if sum(item.file_size for item in infos) > 50 * 1024 * 1024:
-                    raise ValueError("ZIP vượt quá 50MB sau giải nén")
+                if sum(item.file_size for item in infos) > 500 * 1024 * 1024:
+                    raise ValueError("ZIP vượt quá 500MB sau giải nén")
                 txt_files = [item for item in infos if item.filename.lower().endswith(".txt")]
                 if not txt_files:
                     raise ValueError("ZIP không chứa file .txt")
                 for item in txt_files:
-                    if item.file_size > 5 * 1024 * 1024:
-                        raise ValueError(f"File {os.path.basename(item.filename)} vượt quá 5MB")
+                    if item.file_size > 50 * 1024 * 1024:
+                        raise ValueError(f"File {os.path.basename(item.filename)} vượt quá 50MB")
                     texts.append(archive.read(item).decode("utf-8", errors="ignore"))
         except zipfile.BadZipFile as error:
             raise ValueError("File ZIP bị lỗi") from error
+    elif lower.endswith(".rar"):
+        try:
+            with rarfile.RarFile(io.BytesIO(payload)) as archive:
+                infos = [item for item in archive.infolist() if not item.is_dir()]
+                if len(infos) > 5000:
+                    raise ValueError("RAR vượt quá 5000 file")
+                if any(item.flag_bits & 1 for item in infos):
+                    raise ValueError("RAR có file đặt mật khẩu")
+                txt_infos = [item for item in infos if item.filename.lower().endswith('.txt')]
+                if not txt_infos:
+                    raise ValueError("RAR không chứa file .txt")
+                for item in txt_infos:
+                    raw = archive.read(item).decode('utf-8', errors='ignore')
+                    texts.append(raw)
+        except rarfile.BadRarFile:
+            raise ValueError("File RAR bị lỗi")
     else:
-        raise ValueError("Chỉ hỗ trợ file .txt hoặc .zip")
+        raise ValueError("Chỉ hỗ trợ file .txt, .zip hoặc .rar")
 
     from code_goc import checker
 
@@ -1609,8 +1626,8 @@ def cookie_entries_from_upload(filename, payload):
                 continue
             seen.add(key)
             entries.append(checker.build_netscape_format(cookies))
-            if len(entries) > 100:
-                raise ValueError("Mỗi lần chỉ kiểm tra tối đa 100 Cookie")
+            if len(entries) > 99999:
+                raise ValueError("Mỗi lần chỉ kiểm tra tối đa 99999 Cookie")
     if not entries:
         raise ValueError("Không tìm thấy Cookie Netflix hợp lệ trong file")
     return entries
@@ -1625,9 +1642,9 @@ def admin_upload_inventory(kind):
     uploaded = request.files.get("file")
     if not uploaded or not uploaded.filename:
         return jsonify({"ok": False, "error": "Vui lòng chọn file .txt hoặc .zip"}), 400
-    payload = uploaded.read(10 * 1024 * 1024 + 1)
-    if not payload or len(payload) > 10 * 1024 * 1024:
-        return jsonify({"ok": False, "error": "File trống hoặc vượt quá 10MB"}), 400
+    payload = uploaded.read(50 * 1024 * 1024 + 1)
+    if not payload or len(payload) > 50 * 1024 * 1024:
+        return jsonify({"ok": False, "error": "File trống hoặc vượt quá 50MB"}), 400
     try:
         entries = cookie_entries_from_upload(os.path.basename(uploaded.filename), payload)
     except ValueError as error:

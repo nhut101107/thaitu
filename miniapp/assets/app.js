@@ -13,8 +13,8 @@ let searchTimer;
 if (tg) {
   tg.ready();
   tg.expand();
-  tg.setHeaderColor("#f3f7f5");
-  tg.setBackgroundColor("#f3f7f5");
+  tg.setHeaderColor("#f8fafc");
+  tg.setBackgroundColor("#f8fafc");
 }
 
 function render() {

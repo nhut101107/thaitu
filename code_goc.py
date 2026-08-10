@@ -4,6 +4,7 @@ import requests
 import json
 import re
 import zipfile
+import rarfile
 import io
 import time
 import asyncio
@@ -82,19 +83,30 @@ def process_spotify_cookie_text(text):
         if line.startswith('#') or not line.strip():
             continue
         parts = line.strip().split('\t')
+        if len(parts) < 7:
+            parts = re.split(r'\s+', line.strip(), maxsplit=6)
         if len(parts) >= 7:
             try:
-                expiry = parts[4]
+                expiry_str = parts[4].strip()
+                try:
+                    expiry = float(expiry_str)
+                except ValueError:
+                    expiry = 253402300799
+
+                # Note: if expiry_str is empty string or non-numeric, .isdigit() returns False, 
+                # so session field evaluates to False in the else branch - this is OK.
+                session_val = (expiry == 0) if expiry_str.replace('.','',1).isdigit() else False
+
                 cookie_dict = {
                     "domain": parts[0],
-                    "expirationDate": float(expiry) if expiry.replace('.','',1).isdigit() else 253402300799,
+                    "expirationDate": expiry,
                     "hostOnly": not parts[0].startswith('.'),
                     "httpOnly": False,
                     "name": parts[5],
                     "path": parts[2],
                     "sameSite": "unspecified",
                     "secure": parts[3].upper() == 'TRUE',
-                    "session": float(expiry) == 0 if expiry.replace('.','',1).isdigit() else False,
+                    "session": session_val,
                     "storeId": "0",
                     "value": parts[6]
                 }
@@ -147,13 +159,18 @@ async def check_spotify_cookie_live(json_cookies):
                 return False, None  # Nếu là gói FREE -> Vứt
 
             actual_plan = 'PREMIUM'
-            r_fam = requests.get('https://spclient.wg.spotify.com/family/v1/family/home', headers=auth_headers, timeout=10)
+            try:
+                r_fam = requests.get('https://spclient.wg.spotify.com/family/v1/family/home', headers=auth_headers, timeout=10)
 
-            if r_fam.status_code == 200:
-                fam_data = r_fam.json()
-                role = fam_data.get('customRole', fam_data.get('role', '')).upper()
-                if role == 'MASTER' or fam_data.get('isMaster') == True:
-                    actual_plan = 'FAMILY_OWNER'
+                if r_fam.status_code == 200:
+                    fam_data = r_fam.json()
+                    role = fam_data.get('customRole', fam_data.get('role', '')).upper()
+                    if role == 'MASTER' or fam_data.get('isMaster') == True:
+                        actual_plan = 'FAMILY_OWNER'
+            except requests.exceptions.Timeout:
+                pass
+            except Exception:
+                pass
 
             return True, actual_plan
         except Exception as e:
@@ -559,7 +576,7 @@ def configure_bot_token() -> str:
 
 
 MAX_FILE_SIZE = 20 * 1024 * 1024
-MAX_BATCH_COOKIES = 500
+MAX_BATCH_COOKIES = 99999
 MAX_ZIP_ENTRIES = 1000
 MAX_ZIP_UNCOMPRESSED_SIZE = 100 * 1024 * 1024
 MAX_RETRIES = 3
@@ -599,6 +616,18 @@ def validate_zip_archive(archive: zipfile.ZipFile) -> None:
         normalized = item.filename.replace('\\', '/')
         if normalized.startswith('/') or '..' in normalized.split('/'):
             raise ValueError("ZIP chứa đường dẫn không an toàn")
+
+def validate_rar_archive(archive) -> None:
+    """Reject rar bombs, path traversal and unexpectedly large archives."""
+    entries = archive.infolist()
+    if len(entries) > MAX_ZIP_ENTRIES:
+        raise ValueError(f"RAR có quá nhiều file (tối đa {MAX_ZIP_ENTRIES})")
+    if sum(item.file_size for item in entries) > MAX_ZIP_UNCOMPRESSED_SIZE:
+        raise ValueError("Dung lượng giải nén của RAR vượt giới hạn an toàn")
+    for item in entries:
+        normalized = item.filename.replace('\\', '/')
+        if normalized.startswith('/') or '..' in normalized.split('/'):
+            raise ValueError("RAR chứa đường dẫn không an toàn")
 
 MAINTENANCE_MODE = False
 SPAM_TRACKER = {}
@@ -2940,7 +2969,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             link = checker.format_nftoken_link(token)
             await status_msg.edit_text(format_account_card(account, link), parse_mode='Markdown', disable_web_page_preview=True)
             email, plan_val, country_val = account.get('email', 'NoEmail'), account.get('plan', 'NoPlan'), account.get('country', 'XX')
-            filename = f"NF_{re.sub(r'[^\w\-_]', '', email.split('@')[0])}_{re.sub(r'[^\w\-_]', '', plan_val.replace(' ', '_'))}_{re.sub(r'[^\w\-_]', '', country_val)}.txt"
+            _sanitize = re.compile(r'[^\w\-_]')
+            _e = _sanitize.sub('', email.split('@')[0])
+            _p = _sanitize.sub('', plan_val.replace(' ', '_'))
+            _c = _sanitize.sub('', country_val)
+            filename = f"NF_{_e}_{_p}_{_c}.txt"
             file_content = f"# ══════════════════════════════════════\n#  NETFLIX COOKIE + NFTOKEN\n#  Generated by {BOT_NAME} v{BOT_VERSION}\n#  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n# ══════════════════════════════════════\n#\n# Email:      {account.get('email', 'N/A')}\n# Plan:       {account.get('plan', 'N/A')}\n# Country:    {account.get('country', 'N/A')}\n# Payment:    {account.get('payment_method', 'N/A')}\n# CC Type:    {account.get('cc_type', 'N/A')}\n# Streams:    {account.get('max_streams', 'N/A')}\n# Quality:    {account.get('video_quality', 'N/A')}\n# Status:     {account.get('membership_status', 'N/A')}\n# Extra:      {account.get('extra_member_slots', 'N/A')}\n#\n# NFToken:    {token}\n# Login:      {link}\n#\n# ══════════════════════════════════════\n\n{checker.build_netscape_format(cookie_dict)}"
             await context.bot.send_document(chat_id=update.effective_chat.id, document=io.BytesIO(file_content.encode()), filename=filename, caption=f"📄 {filename}")
         else:
@@ -2971,7 +3004,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if current_awaiting not in ['admin_upload_cookie_vip', 'admin_upload_cookie_free', 'admin_upload_cookie_vip_fast', 'admin_upload_cookie_spotify']:
         if user_id == ADMIN_ID and update.message.document:
             fname = update.message.document.file_name or ''
-            if fname.endswith('.txt') or fname.endswith('.zip'): current_awaiting = 'admin_upload_cookie_vip'
+            if fname.endswith('.txt') or fname.endswith('.zip') or fname.endswith('.rar'): current_awaiting = 'admin_upload_cookie_vip'
             else: return
         else: return
 
@@ -2993,21 +3026,31 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if current_awaiting == 'admin_upload_cookie_spotify' and user_id == ADMIN_ID:
-            if not filename.endswith('.zip'):
-                await status_msg.edit_text("❌ Vui lòng gửi định dạng file `.zip`.", reply_markup=kb_admin())
+            if not (filename.endswith('.zip') or filename.endswith('.rar')):
+                await status_msg.edit_text("❌ Vui lòng gửi định dạng file `.zip` hoặc `.rar`.", reply_markup=kb_admin())
                 return
 
-            await status_msg.edit_text("🎧 *Đang giải nén file ZIP Spotify...*", parse_mode='Markdown')
+            await status_msg.edit_text("🎧 *Đang giải nén file...*", parse_mode='Markdown')
 
             extracted_accounts = []
-            with zipfile.ZipFile(file_content_buf) as zip_file:
-                validate_zip_archive(zip_file)
-                for txt_file in [f for f in zip_file.namelist() if f.endswith('.txt')]:
-                    with zip_file.open(txt_file) as f:
-                        text_content = f.read().decode('utf-8', errors='ignore')
-                        result = process_spotify_cookie_text(text_content)
-                        if result:
-                            extracted_accounts.append(result)
+            if filename.endswith('.zip'):
+                with zipfile.ZipFile(file_content_buf) as zip_file:
+                    validate_zip_archive(zip_file)
+                    for txt_file in [f for f in zip_file.namelist() if f.endswith('.txt')]:
+                        with zip_file.open(txt_file) as f:
+                            text_content = f.read().decode('utf-8', errors='ignore')
+                            result = process_spotify_cookie_text(text_content)
+                            if result:
+                                extracted_accounts.append(result)
+            elif filename.endswith('.rar'):
+                with rarfile.RarFile(file_content_buf) as rar_file:
+                    validate_rar_archive(rar_file)
+                    for txt_file in [f for f in rar_file.namelist() if f.endswith('.txt')]:
+                        with rar_file.open(txt_file) as f:
+                            text_content = f.read().decode('utf-8', errors='ignore')
+                            result = process_spotify_cookie_text(text_content)
+                            if result:
+                                extracted_accounts.append(result)
 
             total_len = len(extracted_accounts)
             if total_len == 0:
@@ -3117,9 +3160,19 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         return
                     with zip_file.open(txt_file) as f:
                         all_cookies.extend(checker.extract_cookies_from_text(f.read().decode('utf-8', errors='ignore')))
+        elif filename.endswith('.rar'):
+            with rarfile.RarFile(file_content_buf) as rar_file:
+                validate_rar_archive(rar_file)
+                for txt_file in [f for f in rar_file.namelist() if f.endswith('.txt')]:
+                    if active_tasks.get(chat_id, False):
+                        await status_msg.edit_text(f"⏹ *Đã dừng*\n\n  {FOOTER}", parse_mode='Markdown')
+                        active_tasks.pop(chat_id, None)
+                        return
+                    with rar_file.open(txt_file) as f:
+                        all_cookies.extend(checker.extract_cookies_from_text(f.read().decode('utf-8', errors='ignore')))
         elif filename.endswith('.txt'): all_cookies = checker.extract_cookies_from_text(file_content_buf.read().decode('utf-8', errors='ignore'))
         else:
-            await status_msg.edit_text(f"❌ Chỉ hỗ trợ `.txt` và `.zip`\n\n  {FOOTER}", parse_mode='Markdown', reply_markup=kb_done())
+            await status_msg.edit_text(f"❌ Chỉ hỗ trợ `.txt`, `.zip` và `.rar`\n\n  {FOOTER}", parse_mode='Markdown', reply_markup=kb_done())
             return
 
         if not all_cookies:
