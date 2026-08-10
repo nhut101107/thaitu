@@ -10,8 +10,13 @@ pkg install -y python git cloudflared termux-api
 
 if [ ! -d "$APP_DIR/.git" ]; then
   git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
+  cd "$APP_DIR"
+  git config core.fileMode false
 else
   cd "$APP_DIR"
+  # Termux chmod có thể làm Git hiểu nhầm script là đã sửa chỉ vì executable bit.
+  # Bỏ theo dõi file mode để lần cập nhật sau không bị chặn bởi lỗi local changes.
+  git config core.fileMode false
   git fetch origin "$BRANCH"
   git checkout "$BRANCH"
   git pull --ff-only origin "$BRANCH"
@@ -30,8 +35,6 @@ if [ ! -f .env ]; then
   echo "Đã tạo $APP_DIR/.env"
   echo "Hãy sửa TELEGRAM_BOT_TOKEN, TELEGRAM_ADMIN_ID và thông tin VietQR trước khi chạy."
 fi
-
-chmod +x start_termux.sh stop_termux.sh status_termux.sh 2>/dev/null || true
 
 echo
 echo "Cài đặt Termux hoàn tất."
