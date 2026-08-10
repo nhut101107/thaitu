@@ -85,13 +85,13 @@ run_supervised() {
   done
 }
 
+LAST_SUPERVISOR_PID=""
 start_supervisor() {
   local name="$1"
   shift
-  run_supervised "$name" "$@" &
-  local supervisor=$!
-  echo "$supervisor" > "$RUN_DIR/$name.supervisor.pid"
-  echo "$supervisor"
+  run_supervised "$name" "$@" </dev/null &
+  LAST_SUPERVISOR_PID=$!
+  echo "$LAST_SUPERVISOR_PID" > "$RUN_DIR/$name.supervisor.pid"
 }
 
 wait_for_quick_url() {
@@ -111,7 +111,9 @@ wait_for_quick_url() {
 : > "$LOG_DIR/tunnel.log"
 rm -f "$RUN_DIR/miniapp_url"
 
-SUP_MINIAPP="$(start_supervisor miniapp "$PYTHON" miniapp_server.py)"
+echo "Đang khởi động Mini App..."
+start_supervisor miniapp "$PYTHON" miniapp_server.py
+SUP_MINIAPP="$LAST_SUPERVISOR_PID"
 sleep 1
 
 if [ "$TUNNEL_MODE" = "named" ]; then
@@ -123,10 +125,14 @@ if [ "$TUNNEL_MODE" = "named" ]; then
     echo "Named Tunnel cần TELEGRAM_MINIAPP_URL=https://domain-cua-ban trong .env"
     exit 1
   fi
-  SUP_TUNNEL="$(start_supervisor tunnel cloudflared tunnel --no-autoupdate run --token "$CLOUDFLARE_TUNNEL_TOKEN")"
+  echo "Đang khởi động Cloudflare Named Tunnel..."
+  start_supervisor tunnel cloudflared tunnel --no-autoupdate run --token "$CLOUDFLARE_TUNNEL_TOKEN"
+  SUP_TUNNEL="$LAST_SUPERVISOR_PID"
   PUBLIC_URL="$TELEGRAM_MINIAPP_URL"
 else
-  SUP_TUNNEL="$(start_supervisor tunnel cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:$MINIAPP_PORT")"
+  echo "Đang khởi động Cloudflare Quick Tunnel..."
+  start_supervisor tunnel cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:$MINIAPP_PORT"
+  SUP_TUNNEL="$LAST_SUPERVISOR_PID"
   echo "Đang lấy URL HTTPS từ Cloudflare Quick Tunnel..."
   if ! PUBLIC_URL="$(wait_for_quick_url)"; then
     echo "Không lấy được Quick Tunnel URL sau 30 giây. Log gần nhất:"
@@ -137,7 +143,10 @@ else
 fi
 
 echo "$PUBLIC_URL" > "$RUN_DIR/miniapp_url"
-SUP_BOT="$(start_supervisor bot "$PYTHON" code_goc.py)"
+
+echo "Đang khởi động Telegram bot..."
+start_supervisor bot "$PYTHON" code_goc.py
+SUP_BOT="$LAST_SUPERVISOR_PID"
 
 sleep 2
 
