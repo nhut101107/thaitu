@@ -25,6 +25,19 @@ DATABASE_PATH = os.getenv("BOT_DATABASE_PATH", os.path.join(BASE_DIR, "bot_datab
 STATIC_DIR = os.path.join(BASE_DIR, "miniapp")
 AUTH_MAX_AGE = int(os.getenv("MINIAPP_AUTH_MAX_AGE", "3600"))
 PAGE_SIZE = 20
+
+def env_int(name, default):
+    try:
+        return max(1, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+# Upload limits are configurable for large VPS inventories.
+INVENTORY_MAX_UPLOAD_MB = env_int("INVENTORY_MAX_UPLOAD_MB", 512)
+INVENTORY_MAX_FILE_MB = env_int("INVENTORY_MAX_FILE_MB", 50)
+INVENTORY_MAX_FILES = env_int("INVENTORY_MAX_FILES", 10000)
+INVENTORY_MAX_ENTRIES = env_int("INVENTORY_MAX_ENTRIES", 250000)
+
 CHECKOUT_ATTEMPTS = {}
 CHECKOUT_LOCK = threading.Lock()
 TOOL_ATTEMPTS = {}
@@ -36,7 +49,7 @@ MIGRATED_PATHS = set()
 UPLOAD_JOBS = {}  # job_id -> {status, progress, result, ...}
 UPLOAD_JOBS_LOCK = threading.Lock()
 
-def _bg_upload_worker(job_id, table, entries):
+def _bg_upload_worker(job_id, table, entries, admin_id):
     """Run cookie live-checks in background thread, update UPLOAD_JOBS."""
     try:
         total = len(entries)
@@ -76,9 +89,10 @@ def _bg_upload_worker(job_id, table, entries):
             conn.execute(f"INSERT INTO {table}(data,is_used) VALUES(?,0)", (entry,))
             added += 1
         conn.execute(
-            "INSERT INTO miniapp_admin_audit(ts,action,target,detail) VALUES(?,?,?,?)",
-            (datetime.utcnow().isoformat(), "inventory.upload", table.replace("_cookies", ""),
-             f"checked={total},live={len(live_entries)},added={added},dead={dead},duplicates={duplicates}"),
+            "INSERT INTO miniapp_admin_audit(admin_id,action,target,details,created_at) VALUES(?,?,?,?,?)",
+            (admin_id, "inventory.upload", table.replace("_cookies", ""),
+             f"checked={total},live={len(live_entries)},added={added},dead={dead},duplicates={duplicates}",
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
         )
         conn.commit()
         conn.close()
@@ -95,7 +109,7 @@ def _bg_upload_worker(job_id, table, entries):
             UPLOAD_JOBS[job_id]["result"] = {"ok": False, "error": str(exc)}
 
 app = Flask(__name__, static_folder=None)
-app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = INVENTORY_MAX_UPLOAD_MB * 1024 * 1024
 
 
 def db():
@@ -1657,7 +1671,8 @@ def admin_add_inventory(kind):
     return jsonify({"ok": True, "added": added, "duplicates": len(entries) - added})
 
 
-def cookie_entries_from_upload(filename, payload):
+def cookie_entries_from_upload(filename, payload, max_entries=None):
+    entry_limit = max_entries or INVENTORY_MAX_ENTRIES
     texts = []
     lower = filename.lower()
     if lower.endswith(".txt"):
@@ -1666,18 +1681,18 @@ def cookie_entries_from_upload(filename, payload):
         try:
             with zipfile.ZipFile(io.BytesIO(payload)) as archive:
                 infos = [item for item in archive.infolist() if not item.is_dir()]
-                if len(infos) > 5000:
-                    raise ValueError("ZIP vượt quá 5000 file")
+                if len(infos) > INVENTORY_MAX_FILES:
+                    raise ValueError(f"ZIP vượt quá {INVENTORY_MAX_FILES} file")
                 if any(item.flag_bits & 1 for item in infos):
                     raise ValueError("ZIP có file đặt mật khẩu")
-                if sum(item.file_size for item in infos) > 500 * 1024 * 1024:
-                    raise ValueError("ZIP vượt quá 500MB sau giải nén")
+                if sum(item.file_size for item in infos) > INVENTORY_MAX_UPLOAD_MB * 1024 * 1024:
+                    raise ValueError(f"ZIP vượt quá {INVENTORY_MAX_UPLOAD_MB}MB sau giải nén")
                 txt_files = [item for item in infos if item.filename.lower().endswith(".txt")]
                 if not txt_files:
                     raise ValueError("ZIP không chứa file .txt")
                 for item in txt_files:
-                    if item.file_size > 50 * 1024 * 1024:
-                        raise ValueError(f"File {os.path.basename(item.filename)} vượt quá 50MB")
+                    if item.file_size > INVENTORY_MAX_FILE_MB * 1024 * 1024:
+                        raise ValueError(f"File {os.path.basename(item.filename)} vượt quá {INVENTORY_MAX_FILE_MB}MB")
                     texts.append(archive.read(item).decode("utf-8", errors="ignore"))
         except zipfile.BadZipFile as error:
             raise ValueError("File ZIP bị lỗi") from error
@@ -1686,7 +1701,7 @@ def cookie_entries_from_upload(filename, payload):
             with rarfile.RarFile(io.BytesIO(payload)) as archive:
                 infos = [item for item in archive.infolist() if not item.is_dir()]
                 if len(infos) > 5000:
-                    raise ValueError("RAR vượt quá 5000 file")
+                    raise ValueError(f"RAR vượt quá {INVENTORY_MAX_FILES} file")
                 if any(item.flag_bits & 1 for item in infos):
                     raise ValueError("RAR có file đặt mật khẩu")
                 txt_infos = [item for item in infos if item.filename.lower().endswith('.txt')]
@@ -1713,8 +1728,8 @@ def cookie_entries_from_upload(filename, payload):
                 continue
             seen.add(key)
             entries.append(checker.build_netscape_format(cookies))
-            if len(entries) > 99999:
-                raise ValueError("Mỗi lần chỉ kiểm tra tối đa 99999 Cookie")
+            if len(entries) > entry_limit:
+                raise ValueError(f"Mỗi lần chỉ kiểm tra tối đa {entry_limit} Cookie")
     if not entries:
         raise ValueError("Không tìm thấy Cookie Netflix hợp lệ trong file")
     return entries
@@ -1726,18 +1741,55 @@ def admin_upload_inventory(kind):
     table = {"premium": "premium_cookies", "free": "free_cookies"}.get(kind)
     if not table:
         return jsonify({"ok": False, "error": "Loại kho không hợp lệ"}), 400
-    uploaded = request.files.get("file")
-    if not uploaded or not uploaded.filename:
-        return jsonify({"ok": False, "error": "Vui lòng chọn file .txt, .zip hoặc .rar"}), 400
-    payload = uploaded.read(50 * 1024 * 1024 + 1)
-    if not payload or len(payload) > 50 * 1024 * 1024:
-        return jsonify({"ok": False, "error": "File trống hoặc vượt quá 50MB"}), 400
+
+    # Browsers send a directory as many multipart parts. Keep the legacy
+    # single-file field too, so old clients continue to work.
+    uploaded_files = request.files.getlist("files") or request.files.getlist("file")
+    uploaded_files = [item for item in uploaded_files if item and item.filename]
+    if not uploaded_files:
+        return jsonify({"ok": False, "error": "Vui lòng chọn file hoặc cả thư mục Cookie"}), 400
+    if len(uploaded_files) > INVENTORY_MAX_FILES:
+        return jsonify({"ok": False, "error": f"Thư mục vượt quá {INVENTORY_MAX_FILES} file"}), 400
+
+    allowed = (".txt", ".zip", ".rar")
+    total_bytes = 0
+    entries = []
+    seen_entries = set()
+    skipped = 0
+    per_file_limit = INVENTORY_MAX_FILE_MB * 1024 * 1024
+    total_limit = INVENTORY_MAX_UPLOAD_MB * 1024 * 1024
+
     try:
-        entries = cookie_entries_from_upload(os.path.basename(uploaded.filename), payload)
+        for uploaded in uploaded_files:
+            filename = str(uploaded.filename).replace("\\", "/").rsplit("/", 1)[-1]
+            if not filename.lower().endswith(allowed):
+                skipped += 1
+                continue
+            payload = uploaded.read(per_file_limit + 1)
+            if not payload:
+                skipped += 1
+                continue
+            if len(payload) > per_file_limit:
+                raise ValueError(f"File {filename} vượt quá {INVENTORY_MAX_FILE_MB}MB")
+            total_bytes += len(payload)
+            if total_bytes > total_limit:
+                raise ValueError(f"Tổng dữ liệu vượt quá {INVENTORY_MAX_UPLOAD_MB}MB")
+            remaining = INVENTORY_MAX_ENTRIES - len(entries)
+            if remaining <= 0:
+                raise ValueError(f"Mỗi lần chỉ kiểm tra tối đa {INVENTORY_MAX_ENTRIES} Cookie")
+            for entry in cookie_entries_from_upload(filename, payload, remaining):
+                if entry not in seen_entries:
+                    seen_entries.add(entry)
+                    entries.append(entry)
+                    if len(entries) > INVENTORY_MAX_ENTRIES:
+                        raise ValueError(f"Mỗi lần chỉ kiểm tra tối đa {INVENTORY_MAX_ENTRIES} Cookie")
     except ValueError as error:
         return jsonify({"ok": False, "error": str(error)}), 400
 
-    # Launch background job so other users are not blocked
+    if not entries:
+        return jsonify({"ok": False, "error": "Không tìm thấy Cookie Netflix hợp lệ trong các file đã chọn"}), 400
+
+    # Launch background job so other users are not blocked.
     job_id = uuid.uuid4().hex[:12]
     with UPLOAD_JOBS_LOCK:
         UPLOAD_JOBS[job_id] = {
@@ -1745,10 +1797,20 @@ def admin_upload_inventory(kind):
             "progress": {"checked": 0, "total": len(entries), "live": 0, "dead": 0, "percent": 0},
             "result": None,
         }
-    t = threading.Thread(target=_bg_upload_worker, args=(job_id, table, entries), daemon=True)
+    t = threading.Thread(
+        target=_bg_upload_worker,
+        args=(job_id, table, entries, int(g.telegram_user["id"])),
+        daemon=True,
+    )
     t.start()
-    return jsonify({"ok": True, "job_id": job_id, "total": len(entries), "message": "Đang kiểm tra cookie ở nền..."})
-
+    return jsonify({
+        "ok": True,
+        "job_id": job_id,
+        "total": len(entries),
+        "files": len(uploaded_files),
+        "skipped": skipped,
+        "message": "Đang kiểm tra cookie ở nền...",
+    })
 
 @app.get("/api/admin/inventory/job/<job_id>")
 @admin_required
