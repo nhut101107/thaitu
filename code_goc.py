@@ -1972,7 +1972,7 @@ def process_tv_login(cookie_dict: dict, tv_code: str) -> Tuple[bool, str, dict]:
 def kb_main():
     rows = []
     if MINIAPP_URL.startswith('https://'):
-        rows.append([InlineKeyboardButton("🚀 Mở NFToken Mini App", web_app=WebAppInfo(MINIAPP_URL))])
+        rows.append([InlineKeyboardButton("🚀 MỞ NFToken MINI APP", web_app=WebAppInfo(MINIAPP_URL))])
     rows.extend([
         [InlineKeyboardButton("🛒 Cửa Hàng", callback_data='store_main'), InlineKeyboardButton("💸 Nạp Tiền", callback_data='deposit_main')],
         [InlineKeyboardButton("Lấy Cookie (Đã Mua)", callback_data='extract_vip'), InlineKeyboardButton("Tạo Link (Theo Gói)", callback_data='menu_chk')],
@@ -1980,6 +1980,37 @@ def kb_main():
         [InlineKeyboardButton("📜 Lịch Sử Gói", callback_data='purchase_history'), InlineKeyboardButton("📚 Hướng Dẫn", callback_data='menu_help')]
     ])
     return InlineKeyboardMarkup(rows)
+
+async def cmd_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Public entry point: every user can open the Mini App without an admin check."""
+    if not await check_user_status(update, context): return
+    if not MINIAPP_URL.startswith('https://'):
+        await update.effective_message.reply_text(
+            "⚠️ Mini App chưa được bật công khai. Admin cần cấu hình TELEGRAM_MINIAPP_URL bằng URL HTTPS."
+        )
+        return
+    await update.effective_message.reply_text(
+        "🚀 Bấm nút bên dưới để mở NFToken Pro Mini App.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🚀 MỞ MINI APP", web_app=WebAppInfo(MINIAPP_URL))]
+        ]),
+    )
+
+async def configure_miniapp_menu(application):
+    """Expose the app from Telegram's public bot menu for all chats."""
+    if not MINIAPP_URL.startswith('https://'):
+        logger.warning("TELEGRAM_MINIAPP_URL chưa phải HTTPS; bỏ qua menu Mini App")
+        return
+    try:
+        await application.bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(
+                text="Mở Mini App",
+                web_app=WebAppInfo(MINIAPP_URL),
+            )
+        )
+        logger.info("Đã bật nút công khai Mở Mini App: %s", MINIAPP_URL)
+    except Exception:
+        logger.exception("Không thể cấu hình menu Mini App công khai")
 
 async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_user_status(update, context): return
@@ -3391,6 +3422,7 @@ def main():
     application = (
         Application.builder()
         .token(token)
+        .post_init(configure_miniapp_menu)
         .concurrent_updates(16)
         .connect_timeout(15)
         .read_timeout(30)
@@ -3400,6 +3432,7 @@ def main():
     )
 
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("app", cmd_app))
     application.add_handler(CommandHandler("me", cmd_me))
     application.add_handler(CommandHandler("giftcode", cmd_giftcode))
     application.add_handler(CommandHandler("freecookie", cmd_freecookie))
