@@ -12,7 +12,7 @@ import random
 import sqlite3
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
