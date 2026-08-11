@@ -35,8 +35,12 @@ async function request(path, options = {}) {
     payload = await response.json().catch(() => ({}));
   } catch (_error) {
     if (controller.signal.aborted || externalSignal?.aborted) {
-      const reasonCode = path === "/api/tools/nftoken" ? "nftoken_timeout" : "network_timeout";
-      const message = path === "/api/tools/nftoken" ? "Máy chủ xử lý quá lâu, vui lòng thử lại" : "Máy chủ phản hồi quá chậm, vui lòng thử lại";
+      const reasonCode = path === "/api/tools/nftoken"
+        ? "nftoken_timeout"
+        : path === "/api/tools/tv-login" ? "tv_login_timeout" : "network_timeout";
+      const message = path === "/api/tools/nftoken"
+        ? "Máy chủ xử lý quá lâu, vui lòng thử lại"
+        : path === "/api/tools/tv-login" ? "Kết nối TV quá lâu, vui lòng thử lại" : "Máy chủ phản hồi quá chậm, vui lòng thử lại";
       throw new ApiError(message, 504, {reason_code: reasonCode});
     }
     throw new ApiError("Không thể kết nối máy chủ", 0, {reason_code: "network_error"});
@@ -71,7 +75,7 @@ export const api = {
   checkinHistory: () => request("/api/checkin/history"),
   nftoken: (mode, quantity = 1, requestId = "") => request("/api/tools/nftoken", {method: "POST", body: JSON.stringify({mode, quantity, requestId})}),
   nftokenJob: (requestId) => request(`/api/tools/nftoken/job/${encodeURIComponent(requestId)}`),
-  tvLogin: (code) => request("/api/tools/tv-login", {method: "POST", body: JSON.stringify({code})}),
+  tvLogin: (code) => request("/api/tools/tv-login", {method: "POST", body: JSON.stringify({code}), timeoutMs: 90000}),
   giftcode: (code) => request("/api/giftcode", {method: "POST", body: JSON.stringify({code})}),
   deposit: (amount) => request("/api/deposits", {method: "POST", body: JSON.stringify({amount})}),
   submitDeposit: (id) => request(`/api/deposits/${id}/submit`, {method: "POST", body: "{}"}),

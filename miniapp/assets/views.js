@@ -1,6 +1,6 @@
-import {api} from "./api.js?v=13";
+import {api} from "./api.js?v=14";
 import {state, update} from "./state.js";
-import {emptyState, escapeHtml, formatMoney, icon, modal, productCard, skeleton, toast} from "./components.js?v=13";
+import {emptyState, escapeHtml, formatMoney, icon, modal, productCard, skeleton, toast} from "./components.js?v=14";
 
 function section(title, body, action = "") {
   return `<section class="content-section"><div class="section-title"><div><small>Shop MMO</small><h2>${title}</h2></div>${action}</div>${body}</section>`;
@@ -141,7 +141,7 @@ function accountSummary(account = {}) {
         {label: "Quốc gia", value: account.country},
         {label: "Trạng thái", value: account.status},
       ];
-  return `<section class="account-summary"><div class="account-summary-head"><b>Thông tin tài khoản</b><small>Credential nhạy cảm đã được ẩn</small></div><div class="account-detail-grid">${rows.map((row) => `<div class="account-detail"><span>${escapeHtml(row.label || "Thông tin")}</span><strong>${escapeHtml(row.value || "Netflix không cung cấp")}</strong></div>`).join("")}</div></section>`;
+  return `<section class="account-summary"><div class="account-summary-head"><b>Thông tin tài khoản</b></div><div class="account-detail-grid">${rows.map((row) => `<div class="account-detail"><span>${escapeHtml(row.label || "Thông tin")}</span><strong>${escapeHtml(row.value || "Netflix không cung cấp")}</strong></div>`).join("")}</div></section>`;
 }
 
 export function openNftoken(mode = "plan") {
@@ -192,7 +192,7 @@ function tvLogMarkup(items = []) {
 }
 
 export function openTvLogin() {
-  modal(`<div class="tv-hero"><span>📺</span><div><div class="eyebrow">NETFLIX TV CONNECT</div><h2>Đăng nhập TV an toàn</h2></div></div><p class="modal-lead">Mở Netflix trên TV → chọn <b>Đăng nhập từ trang web</b> → nhập đúng 8 chữ số đang hiển thị.</p><label class="field">Mã TV<input id="tv-code" inputmode="numeric" maxlength="9" autocomplete="one-time-code" placeholder="Ví dụ: 1234 5678"></label>${tvLogMarkup()}<p class="tv-note">Cookie được giữ lại nếu kết nối thất bại; hệ thống không hiển thị Cookie ra ngoài.</p><button class="button wide" data-run-tv>Kiểm tra & kết nối</button>`, {onOpen(root) {
+  modal(`<div class="tv-hero"><span>📺</span><div><h2>Đăng nhập TV</h2></div></div><label class="field">Mã TV<input id="tv-code" inputmode="numeric" maxlength="9" autocomplete="one-time-code" placeholder="Nhập 8 chữ số"></label>${tvLogMarkup()}<button class="button wide" data-run-tv>Kiểm tra & kết nối</button>`, {onOpen(root) {
     const button = root.querySelector("[data-run-tv]");
     const input = root.querySelector("#tv-code");
     const renderLog = (items) => { const log = root.querySelector("[data-tv-log]"); if (log) log.outerHTML = tvLogMarkup(items); };
@@ -208,7 +208,7 @@ export function openTvLogin() {
       try {
         const result = await api.tvLogin(code);
         clearInterval(timer); renderLog(result.steps || []);
-        setTimeout(() => { const close = modal(`<div class="confirm-icon">✓</div><div class="eyebrow">TV CONNECTED</div><h2>${escapeHtml(result.message)}</h2><p class="modal-lead">Thiết bị đã được liên kết thành công.</p>${accountSummary(result.account)}<button class="button wide" data-close-result>Hoàn tất</button>`); document.querySelector("[data-close-result]")?.addEventListener("click", close); }, 280);
+        setTimeout(() => { const close = modal(`<div class="confirm-icon">✓</div><h2>${escapeHtml(result.message)}</h2>${accountSummary(result.account)}<button class="button wide" data-close-result>Hoàn tất</button>`); document.querySelector("[data-close-result]")?.addEventListener("click", close); }, 280);
       } catch (error) {
         clearInterval(timer); renderLog(error.payload?.steps || [{key: "connect", label: "Kết nối Netflix TV", status: "error"}]);
         const sheet = root.querySelector(".modal-sheet");

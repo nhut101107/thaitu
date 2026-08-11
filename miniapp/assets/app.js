@@ -1,8 +1,8 @@
-import {api} from "./api.js?v=13";
+import {api} from "./api.js?v=14";
 import {state, subscribe, update} from "./state.js";
-import {bottomNav, header, toast} from "./components.js?v=13";
-import {accountView, addToCart, claimFreeCookie, homeView, openCart, openCheckin, openDeposit, openGiftcode, openHelp, openMissions, openNftoken, openNotifications, openOrder, openProduct, openReferral, openSupport, openTvLogin, ordersView, storeView, toolsView} from "./views.js?v=13";
-import {adminView, bindAdminEvents, loadAdmin} from "./admin.js?v=13";
+import {bottomNav, header, toast} from "./components.js?v=14";
+import {accountView, addToCart, claimFreeCookie, homeView, openCart, openCheckin, openDeposit, openGiftcode, openHelp, openMissions, openNftoken, openNotifications, openOrder, openProduct, openReferral, openSupport, openTvLogin, ordersView, storeView, toolsView} from "./views.js?v=14";
+import {adminView, bindAdminEvents, loadAdmin} from "./admin.js?v=14";
 
 const tg = window.Telegram?.WebApp;
 const app = document.querySelector("#app");

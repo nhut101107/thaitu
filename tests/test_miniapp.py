@@ -120,7 +120,10 @@ class MiniAppTest(unittest.TestCase):
         self.assertIn("requestId", views_source)
         self.assertIn("Thử lại", views_source)
         self.assertIn("finally", views_source)
-        self.assertIn('api.js?v=13', Path("miniapp/assets/app.js").read_text(encoding="utf-8"))
+        self.assertIn('timeoutMs: 90000', api_source)
+        self.assertNotIn('tv-note', views_source)
+        self.assertNotIn('Credential nhạy cảm đã được ẩn', views_source)
+        self.assertIn('api.js?v=14', Path("miniapp/assets/app.js").read_text(encoding="utf-8"))
 
     def test_checkout_is_atomic_and_idempotent(self):
         response = self.client.put("/api/cart/1", json={"quantity": 2}, headers=self.headers)

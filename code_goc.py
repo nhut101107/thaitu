@@ -28,6 +28,7 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATABASE_PATH = os.getenv('BOT_DATABASE_PATH', os.path.join(APP_DIR, 'bot_database.db'))
 TOKEN_FILE = os.path.join(APP_DIR, 'tokenbot.txt')
 ADMIN_ID = int(os.getenv('TELEGRAM_ADMIN_ID', '5992662564'))
+TV_LOGIN_DEADLINE_SECONDS = 90.0
 
 def get_connection():
     return sqlite3.connect(DATABASE_PATH, timeout=30, check_same_thread=False)
@@ -2120,6 +2121,7 @@ def process_tv_login(cookie_dict: dict, tv_code: str) -> Tuple[bool, str, str, d
     driver = None
     temp_dir = tempfile.mkdtemp()
     attempt_id = f"tv-{int(time.time() * 1000) % 100000000:08d}"
+    login_deadline = time.monotonic() + TV_LOGIN_DEADLINE_SECONDS
 
     def current_path():
         if not driver:
@@ -2146,6 +2148,12 @@ def process_tv_login(cookie_dict: dict, tv_code: str) -> Tuple[bool, str, str, d
     def log_stage(stage, level=logging.INFO):
         # Never log the TV code, cookies, query string, page body or account data.
         logger.log(level, "TV login attempt=%s stage=%s path=%s", attempt_id, stage, current_path() or "-")
+
+    def remaining_timeout(default):
+        remaining = login_deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutException()
+        return min(float(default), remaining)
 
     def first_interactable(selectors):
         for selector in selectors:
@@ -2228,6 +2236,7 @@ def process_tv_login(cookie_dict: dict, tv_code: str) -> Tuple[bool, str, str, d
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option('useAutomationExtension', False)
+        options.page_load_strategy = "eager"
 
         bin_path = "/data/data/com.termux/files/usr/bin/chromium-browser"
         if not os.path.exists(bin_path):
@@ -2256,7 +2265,7 @@ def process_tv_login(cookie_dict: dict, tv_code: str) -> Tuple[bool, str, str, d
             # Selenium Manager resolves the matching ChromeDriver on Windows.
             driver = webdriver.Chrome(options=options)
 
-        driver.set_page_load_timeout(45)
+        driver.set_page_load_timeout(25)
         try:
             driver.execute_cdp_cmd(
                 "Page.addScriptToEvaluateOnNewDocument",
@@ -2266,10 +2275,26 @@ def process_tv_login(cookie_dict: dict, tv_code: str) -> Tuple[bool, str, str, d
             pass
         log_stage("browser_started")
 
-        driver.get("https://www.netflix.com/")
-        WebDriverWait(driver, 20).until(
-            lambda active_driver: active_driver.execute_script("return document.readyState") in ("interactive", "complete")
-        )
+        def open_page(url, stage):
+            navigation_timeout = False
+            try:
+                driver.get(url)
+            except TimeoutException:
+                navigation_timeout = True
+                log_stage(f"{stage}_navigation_timeout", logging.WARNING)
+            try:
+                WebDriverWait(driver, remaining_timeout(12), poll_frequency=0.25).until(
+                    lambda active_driver: active_driver.execute_script("return document.readyState") in ("interactive", "complete")
+                )
+            except TimeoutException:
+                if not current_path():
+                    return False
+            if navigation_timeout and not current_path():
+                return False
+            return True
+
+        if not open_page("https://www.netflix.com/", "home"):
+            return False, "network_timeout", f"Netflix phản hồi quá chậm (mã lỗi {attempt_id})", {}
         accepted_cookies = 0
         for key, value in cookie_dict.items():
             if not key or value is None:
@@ -2291,10 +2316,8 @@ def process_tv_login(cookie_dict: dict, tv_code: str) -> Tuple[bool, str, str, d
             return False, "cookie_format", "Cookie sai định dạng hoặc thiếu phiên Netflix", {}
 
         # The TV code page is public, so validate the authenticated session first.
-        driver.get("https://www.netflix.com/YourAccount")
-        WebDriverWait(driver, 20).until(
-            lambda active_driver: active_driver.execute_script("return document.readyState") in ("interactive", "complete")
-        )
+        if not open_page("https://www.netflix.com/YourAccount", "account"):
+            return False, "network_timeout", f"Netflix phản hồi quá chậm (mã lỗi {attempt_id})", {}
         account_path = current_path()
         login_controls = driver.find_elements(By.CSS_SELECTOR, "input[name='password'], input[type='password']")
         if is_login_path(account_path) or login_controls:
@@ -2302,8 +2325,9 @@ def process_tv_login(cookie_dict: dict, tv_code: str) -> Tuple[bool, str, str, d
             return False, "cookie_expired", "Cookie đã chết hoặc hết hạn", {}
         log_stage("cookie_validated")
 
-        driver.get("https://www.netflix.com/tv8")
-        wait = WebDriverWait(driver, 25, poll_frequency=0.4)
+        if not open_page("https://www.netflix.com/tv8", "tv"):
+            return False, "network_timeout", f"Netflix phản hồi quá chậm (mã lỗi {attempt_id})", {}
+        wait = WebDriverWait(driver, remaining_timeout(25), poll_frequency=0.4)
         try:
             code_input = wait.until(lambda _active_driver: first_interactable(input_selectors))
         except TimeoutException:
@@ -2359,7 +2383,7 @@ def process_tv_login(cookie_dict: dict, tv_code: str) -> Tuple[bool, str, str, d
 
         if submit_btn and not submit_btn.is_enabled():
             try:
-                submit_btn = WebDriverWait(driver, 10, poll_frequency=0.25).until(
+                submit_btn = WebDriverWait(driver, remaining_timeout(10), poll_frequency=0.25).until(
                     lambda _active_driver: first_interactable(submit_selectors)
                     or enabled_form_button(form_element)
                 )
@@ -2444,7 +2468,7 @@ def process_tv_login(cookie_dict: dict, tv_code: str) -> Tuple[bool, str, str, d
             return False
 
         try:
-            state = WebDriverWait(driver, 35, poll_frequency=0.5).until(result_state)
+            state = WebDriverWait(driver, remaining_timeout(35), poll_frequency=0.5).until(result_state)
         except TimeoutException:
             path = current_path()
             if path in ("/browse", "/profiles") or any(
@@ -2470,7 +2494,12 @@ def process_tv_login(cookie_dict: dict, tv_code: str) -> Tuple[bool, str, str, d
         if state == "success":
             log_stage("connected", logging.WARNING)
             current_cookies = {ck['name']: ck['value'] for ck in driver.get_cookies()}
-            account_info = checker.get_account_info(current_cookies)
+            remaining = max(0.1, login_deadline - time.monotonic())
+            account_info = checker.get_account_info(
+                current_cookies,
+                request_timeout=min(5.0, remaining),
+                deadline=login_deadline,
+            )
             return True, "connected", "Thành công", account_info
 
         log_stage("unknown_result", logging.WARNING)

@@ -35,7 +35,7 @@ DATABASE_PATH = os.getenv("BOT_DATABASE_PATH", os.path.join(BASE_DIR, "bot_datab
 STATIC_DIR = os.path.join(BASE_DIR, "miniapp")
 AUTH_MAX_AGE = int(os.getenv("MINIAPP_AUTH_MAX_AGE", "3600"))
 PAGE_SIZE = 20
-TV_LOGIN_RUNTIME_VERSION = "tv-login-runtime-r9"
+TV_LOGIN_RUNTIME_VERSION = "tv-login-runtime-r10"
 DOWNLOAD_SECRET = os.getenv("MINIAPP_DOWNLOAD_SECRET") or os.getenv("TELEGRAM_BOT_TOKEN", "nftoken-download-secret")
 
 
