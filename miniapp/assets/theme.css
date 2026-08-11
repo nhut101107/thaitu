@@ -229,3 +229,8 @@ body::after { right: -150px; bottom: 18%; background: #18181b; animation-delay: 
 .account-detail span { color: var(--muted); font-size: 9px; margin-bottom: 5px; }
 .account-detail strong { color: var(--ink); font-size: 11px; line-height: 1.35; }
 @media (max-width: 390px) { .account-detail-grid { grid-template-columns: 1fr; } }
+ .flash-sale-badge { background: #dc2626 !important; color: #fff !important; }
+ .notification-item { padding: 14px 0; border-bottom: 1px solid rgba(255,255,255,.1); }
+ .notification-item.unread { border-left: 3px solid #fff; padding-left: 10px; }
+ .notification-item p { margin: 6px 0; opacity: .8; }
+ .notification-item small { opacity: .55; }

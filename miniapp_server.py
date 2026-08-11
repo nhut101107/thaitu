@@ -19,9 +19,14 @@ from urllib.parse import parse_qsl, quote, urlparse
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
-from flask import Flask, g, jsonify, request, send_from_directory
+from flask import Flask, Response, g, jsonify, request, send_from_directory
 from account_normalization import normalize_account_payload
 from product_providers import ProviderError, provider_from_row
+from advanced_features import (
+    APP_TZ, csv_bytes, flash_price, local_now, mask_user_id, normalize_language,
+    period_bounds, period_key, retryable_provider_error, safe_filename,
+    signed_download_token, translate, verify_download_token, watermark_export,
+)
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +35,7 @@ STATIC_DIR = os.path.join(BASE_DIR, "miniapp")
 AUTH_MAX_AGE = int(os.getenv("MINIAPP_AUTH_MAX_AGE", "3600"))
 PAGE_SIZE = 20
 TV_LOGIN_RUNTIME_VERSION = "tv-login-runtime-r9"
+DOWNLOAD_SECRET = os.getenv("MINIAPP_DOWNLOAD_SECRET") or os.getenv("TELEGRAM_BOT_TOKEN", "nftoken-download-secret")
 
 
 def source_fingerprint():
@@ -205,6 +211,20 @@ def migrate():
             credits INTEGER DEFAULT 0, plan_name TEXT DEFAULT 'FREE',
             is_banned INTEGER DEFAULT 0, last_active TEXT
         );
+        CREATE TABLE IF NOT EXISTS missions(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            condition_json TEXT NOT NULL DEFAULT '{}',
+            reward_credits INTEGER NOT NULL DEFAULT 0,
+            starts_at TEXT,
+            ends_at TEXT,
+            max_claims INTEGER NOT NULL DEFAULT 0,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS store(
             id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT,
             price INTEGER, credits INTEGER
@@ -296,6 +316,7 @@ def migrate():
         "referred_by": "INTEGER",
         "referral_qualified": "INTEGER DEFAULT 0",
         "referral_joined_at": "TEXT",
+        "language": "TEXT DEFAULT 'vi'",
     }.items():
         if name not in user_columns:
             connection.execute(f"ALTER TABLE users ADD COLUMN {name} {definition}")
@@ -461,6 +482,11 @@ def migrate():
         INSERT OR IGNORE INTO customer_rank_settings(rank,referral_threshold,spend_threshold,benefits) VALUES
             ('Bronze',0,0,'Hạng mặc định'),('Silver',5,100000,'Ưu đãi Silver'),
             ('Platinum',20,500000,'Ưu đãi Platinum'),('Diamond',50,2000000,'Ưu đãi Diamond');
+        INSERT OR IGNORE INTO missions(code,name,description,condition_json,reward_credits,active,created_at,updated_at)
+            VALUES
+            ('daily_checkin','Điểm danh hôm nay','Điểm danh Cookie Free trong ngày','{"type":"checkin"}',1,1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP),
+            ('first_order','Đơn hàng đầu tiên','Hoàn thành đơn hàng đầu tiên','{"type":"first_order"}',2,1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP),
+            ('refer_friend','Giới thiệu bạn bè','Có ít nhất một referral hợp lệ','{"type":"referral","minimum":1}',1,1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);
         INSERT OR IGNORE INTO copyright_settings(id,enabled,text,updated_at)
             VALUES(1,1,'© mnhut - NFToken Pro\nBản quyền nội dung xuất bởi hệ thống NFToken Pro',CURRENT_TIMESTAMP);
         CREATE INDEX IF NOT EXISTS idx_purchase_history_user_date
@@ -473,8 +499,129 @@ def migrate():
             ON miniapp_support(user_id, id DESC);
         CREATE INDEX IF NOT EXISTS idx_miniapp_admin_audit_date
             ON miniapp_admin_audit(id DESC);
+        CREATE TABLE IF NOT EXISTS referral_periods(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            period_type TEXT NOT NULL,
+            period_key TEXT NOT NULL,
+            starts_at TEXT NOT NULL,
+            ends_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'OPEN',
+            reward_enabled INTEGER NOT NULL DEFAULT 0,
+            reward_credits INTEGER NOT NULL DEFAULT 0,
+            winner_limit INTEGER NOT NULL DEFAULT 10,
+            created_at TEXT NOT NULL,
+            closed_at TEXT,
+            UNIQUE(period_type,period_key)
+        );
+        CREATE TABLE IF NOT EXISTS referral_period_rewards(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            period_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            rank_position INTEGER NOT NULL,
+            reward_credits INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            UNIQUE(period_id,user_id), UNIQUE(period_id,rank_position)
+        );
+        CREATE TABLE IF NOT EXISTS flash_sales(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            store_item_id INTEGER NOT NULL,
+            discount_percent INTEGER NOT NULL,
+            quantity_limit INTEGER NOT NULL,
+            quantity_sold INTEGER NOT NULL DEFAULT 0,
+            starts_at TEXT NOT NULL,
+            ends_at TEXT NOT NULL,
+            allow_promo INTEGER NOT NULL DEFAULT 0,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(store_item_id) REFERENCES store(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_flash_sales_active_time ON flash_sales(active,starts_at,ends_at);
+        CREATE TABLE IF NOT EXISTS flash_sale_claims(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sale_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            checkout_key TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(sale_id,checkout_key)
+        );
+        CREATE TABLE IF NOT EXISTS provider_attempts(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            checkout_key TEXT NOT NULL,
+            provider_id INTEGER NOT NULL,
+            external_product_id TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL,
+            latency_ms INTEGER NOT NULL DEFAULT 0,
+            error_code TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_provider_attempts_checkout ON provider_attempts(checkout_key,id DESC);
+        CREATE TABLE IF NOT EXISTS secure_downloads(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token_hash TEXT NOT NULL UNIQUE,
+            user_id INTEGER NOT NULL,
+            order_id INTEGER NOT NULL,
+            filename TEXT NOT NULL,
+            content BLOB NOT NULL,
+            content_type TEXT NOT NULL DEFAULT 'text/plain; charset=utf-8',
+            expires_at TEXT NOT NULL,
+            max_downloads INTEGER NOT NULL DEFAULT 1,
+            download_count INTEGER NOT NULL DEFAULT 0,
+            revoked INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            last_downloaded_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS missions(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            condition_json TEXT NOT NULL DEFAULT '{}',
+            reward_credits INTEGER NOT NULL DEFAULT 0,
+            starts_at TEXT,
+            ends_at TEXT,
+            max_claims INTEGER NOT NULL DEFAULT 0,
+            active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS mission_claims(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mission_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            claimed_at TEXT NOT NULL,
+            UNIQUE(mission_id,user_id)
+        );
+        CREATE TABLE IF NOT EXISTS notifications(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL DEFAULT '',
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            is_read INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id,is_read,id DESC);
+        CREATE TABLE IF NOT EXISTS user_preferences(
+            user_id INTEGER PRIMARY KEY,
+            language TEXT NOT NULL DEFAULT 'vi',
+            updated_at TEXT NOT NULL
+        );
         """
     )
+    provider_columns = column_names(connection, "product_providers")
+    for name, definition in {
+        "priority": "INTEGER NOT NULL DEFAULT 100",
+        "last_error_code": "TEXT NOT NULL DEFAULT ''",
+        "last_response_ms": "INTEGER NOT NULL DEFAULT 0",
+        "last_checked_at": "TEXT",
+    }.items():
+        if name not in provider_columns:
+            connection.execute(f"ALTER TABLE product_providers ADD COLUMN {name} {definition}")
+
     checkout_columns = column_names(connection, "miniapp_checkouts")
     for name, definition in {
         "original_total": "INTEGER NOT NULL DEFAULT 0",
@@ -1000,6 +1147,66 @@ def copyright_payload(connection):
     return {"enabled": bool(row["enabled"]) if row else True, "text": row["text"] if row else "© mnhut - NFToken Pro\nBản quyền nội dung xuất bởi hệ thống NFToken Pro"}
 
 
+def download_expiry_seconds():
+    try:
+        return max(60, min(int(os.getenv("DOWNLOAD_LINK_TTL_SECONDS", "3600")), 7 * 86400))
+    except ValueError:
+        return 3600
+
+
+def create_secure_download(connection, user_id, order_id, content, filename, content_type="text/plain; charset=utf-8", max_downloads=1):
+    expires_at = int(time.time()) + download_expiry_seconds()
+    token = signed_download_token(DOWNLOAD_SECRET, user_id, order_id, expires_at)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    connection.execute(
+        """INSERT INTO secure_downloads(token_hash,user_id,order_id,filename,content,content_type,expires_at,max_downloads,created_at)
+           VALUES(?,?,?,?,?,?,?,?,?)""",
+        (token_hash, int(user_id), int(order_id), safe_filename(filename), sqlite3.Binary(str(content).encode("utf-8")), content_type, datetime.fromtimestamp(expires_at, APP_TZ).replace(tzinfo=None).isoformat(timespec="seconds"), max(1, int(max_downloads)), now_iso()),
+    )
+    return f"/api/download/{quote(token, safe='')}"
+
+
+def active_flash_sale(connection, item_id, now=None):
+    stamp = (now or local_now()).replace(tzinfo=None).isoformat(timespec="seconds")
+    return connection.execute(
+        """SELECT * FROM flash_sales
+           WHERE store_item_id=? AND active=1 AND starts_at<=? AND ends_at>? AND quantity_sold<quantity_limit
+           ORDER BY discount_percent DESC,id DESC LIMIT 1""",
+        (int(item_id), stamp, stamp),
+    ).fetchone()
+
+
+def priced_item(connection, row):
+    sale = active_flash_sale(connection, row["id"])
+    item = product_dict(row)
+    if sale:
+        item["regularPrice"] = item["price"]
+        item["price"] = flash_price(item["price"], sale["discount_percent"])
+        item["flashSale"] = {"id": sale["id"], "name": sale["name"], "discountPercent": sale["discount_percent"], "quantityRemaining": max(0, sale["quantity_limit"] - sale["quantity_sold"]), "startsAt": sale["starts_at"], "endsAt": sale["ends_at"], "allowPromo": bool(sale["allow_promo"])}
+    else:
+        item["flashSale"] = None
+    return item
+
+
+def notify(connection, user_id, kind, title, body="", payload=None):
+    connection.execute("INSERT INTO notifications(user_id,kind,title,body,payload_json,created_at) VALUES(?,?,?,?,?,?)", (user_id, kind, title[:200], body[:2000], json.dumps(payload or {}, ensure_ascii=False), now_iso()))
+
+
+def mission_progress(connection, user_id, mission):
+    condition = json.loads(mission["condition_json"] or "{}")
+    kind = condition.get("type")
+    if kind == "checkin":
+        return bool(connection.execute("SELECT 1 FROM free_cookie_checkins WHERE user_id=? AND local_date=?", (user_id, local_today())).fetchone())
+    if kind == "first_order":
+        return bool(connection.execute("SELECT 1 FROM purchase_history WHERE user_id=? AND status NOT IN ('CANCELLED','FAILED')", (user_id,)).fetchone())
+    if kind == "referral":
+        count = connection.execute("SELECT COUNT(*) FROM referral_events e JOIN users u ON u.user_id=e.referred_id WHERE e.referrer_id=? AND e.status='qualified' AND u.is_banned=0", (user_id,)).fetchone()[0]
+        return count >= int(condition.get("minimum", 1))
+    if kind == "promotion":
+        return bool(connection.execute("SELECT 1 FROM purchase_history WHERE user_id=? AND promo_code<>''", (user_id,)).fetchone())
+    return False
+
+
 def calculate_promo(connection, user_id, code, items):
     code = str(code or "").strip().upper()
     original = sum(int(item["lineTotal"]) for item in items)
@@ -1023,6 +1230,8 @@ def calculate_promo(connection, user_id, code, items):
     selected = {int(value) for value in str(row["product_ids"] or "").split(",") if value.strip().isdigit()}
     if selected and any(int(item["id"]) not in selected for item in items):
         raise ToolError("Mã giảm giá không áp dụng cho sản phẩm này", 409)
+    if any(item.get("flashSale") and not item["flashSale"].get("allowPromo") for item in items):
+        raise ToolError("Flash Sale không cho dùng mã giảm giá", 409)
     if int(row["per_user"] or 1) and connection.execute("SELECT 1 FROM discount_redemptions WHERE code=? AND user_id=?", (code, user_id)).fetchone():
         raise ToolError("Bạn đã sử dụng mã này", 409)
     if int(row["uses"] or 0) <= connection.execute("SELECT COUNT(*) FROM discount_redemptions WHERE code=?", (code,)).fetchone()[0]:
@@ -1036,6 +1245,52 @@ def provider_for(row):
     if provider_id in PROVIDER_INSTANCES:
         return PROVIDER_INSTANCES[provider_id]
     return provider_from_row(row)
+
+
+def provider_candidates(connection, item, primary_id):
+    external_id = str(item.get("externalProductId") or "")
+    rows = connection.execute(
+        """SELECT p.* FROM product_providers p
+           JOIN store s ON s.provider_id=p.id
+           WHERE p.enabled=1 AND s.external_product_id=? AND s.active=1
+           ORDER BY CASE WHEN p.id=? THEN 0 ELSE 1 END, p.priority ASC, p.id ASC""",
+        (external_id, int(primary_id)),
+    ).fetchall()
+    if not rows:
+        row = connection.execute("SELECT * FROM product_providers WHERE id=? AND enabled=1", (primary_id,)).fetchone()
+        return [row] if row else []
+    seen = set()
+    return [row for row in rows if not (row["id"] in seen or seen.add(row["id"]))]
+
+
+def create_provider_order_with_fallback(connection, item, user_id, checkout_key, quantity=1):
+    primary_id = item.get("providerId")
+    if not primary_id or not item.get("externalProductId"):
+        raise ProviderError("provider_config_invalid", "Sản phẩm chưa được cấu hình nhà cung cấp")
+    candidates = provider_candidates(connection, item, primary_id)
+    if not candidates:
+        raise ProviderError("provider_unavailable", "Nhà cung cấp không khả dụng")
+    last_error = None
+    for candidate in candidates:
+        started = time.perf_counter()
+        try:
+            result = provider_for(candidate).create_order(item["externalProductId"], quantity, checkout_key, {"checkout_key": checkout_key})
+            status = str(result.get("status", "fulfilled")).lower()
+            if status in {"failed", "rejected", "error"}:
+                raise ProviderError("provider_rejected", "Nhà cung cấp từ chối yêu cầu")
+            elapsed = int((time.perf_counter() - started) * 1000)
+            connection.execute("INSERT INTO provider_attempts(checkout_key,provider_id,external_product_id,status,latency_ms,created_at) VALUES(?,?,?,?,?,?)", (checkout_key, candidate["id"], item["externalProductId"], "success", elapsed, now_iso()))
+            connection.execute("UPDATE product_providers SET last_error_code='',last_response_ms=?,last_checked_at=? WHERE id=?", (elapsed, now_iso(), candidate["id"]))
+            return candidate, result
+        except ProviderError as error:
+            elapsed = int((time.perf_counter() - started) * 1000)
+            last_error = error
+            code = getattr(error, "reason_code", "provider_error")
+            connection.execute("INSERT INTO provider_attempts(checkout_key,provider_id,external_product_id,status,latency_ms,error_code,created_at) VALUES(?,?,?,?,?,?,?)", (checkout_key, candidate["id"], item["externalProductId"], "failed", elapsed, code, now_iso()))
+            connection.execute("UPDATE product_providers SET last_error_code=?,last_response_ms=?,last_checked_at=? WHERE id=?", (code, elapsed, now_iso(), candidate["id"]))
+            if not retryable_provider_error(code):
+                raise
+    raise last_error or ProviderError("provider_unavailable")
 
 
 def auto_product_image(name, category):
@@ -1114,6 +1369,18 @@ def assets(filename):
     return send_from_directory(os.path.join(STATIC_DIR, "assets"), filename)
 
 
+@app.get("/manifest.json")
+def manifest():
+    return send_from_directory(STATIC_DIR, "manifest.json", mimetype="application/manifest+json")
+
+
+@app.get("/sw.js")
+def service_worker():
+    response = send_from_directory(STATIC_DIR, "sw.js", mimetype="application/javascript")
+    response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 @app.get("/api/health")
 def health():
     return jsonify({
@@ -1131,7 +1398,7 @@ def bootstrap():
     user_id = ensure_user(connection, g.telegram_user)
     connection.commit()
     user = connection.execute(
-        "SELECT balance,credits,nftoken_credits,plan_name FROM users WHERE user_id=?", (user_id,)
+        "SELECT balance,credits,nftoken_credits,plan_name,language FROM users WHERE user_id=?", (user_id,)
     ).fetchone()
     spent = connection.execute(
         "SELECT COALESCE(SUM(price), 0) FROM purchase_history WHERE user_id=?",
@@ -1170,6 +1437,7 @@ def bootstrap():
                 "orderCount": orders,
                 "cartCount": cart_count,
                 "rank": rank_payload(connection, user_id),
+                "language": normalize_language(user["language"] or g.telegram_user.get("language_code", "vi")),
             },
             "inventory": {"premiumCookies": stock},
             "quota": quota,
@@ -1246,7 +1514,7 @@ def products():
         if row[0]
     ]
     return jsonify(
-        {"ok": True, "items": [product_dict(row) for row in rows], "categories": categories, "page": page}
+        {"ok": True, "items": [priced_item(db(), row) for row in rows], "categories": categories, "page": page}
     )
 
 
@@ -1256,7 +1524,7 @@ def product(item_id):
     row = db().execute("SELECT * FROM store WHERE id=? AND active=1", (item_id,)).fetchone()
     if not row:
         return jsonify({"ok": False, "error": "Sản phẩm không tồn tại"}), 404
-    return jsonify({"ok": True, "item": product_dict(row)})
+    return jsonify({"ok": True, "item": priced_item(db(), row)})
 
 
 def cart_payload(connection, user_id):
@@ -1269,9 +1537,9 @@ def cart_payload(connection, user_id):
     items = []
     total = 0
     for row in rows:
-        item = product_dict(row)
+        item = priced_item(connection, row)
         item["quantity"] = row["quantity"]
-        item["lineTotal"] = row["price"] * row["quantity"]
+        item["lineTotal"] = item["price"] * row["quantity"]
         total += item["lineTotal"]
         items.append(item)
     return {"items": items, "total": total, "count": sum(x["quantity"] for x in items)}
@@ -1345,20 +1613,26 @@ def checkout():
             connection.rollback()
             return jsonify({"ok": False, "error": "Giỏ hàng đang trống"}), 400
         promo = calculate_promo(connection, user_id, promo_code, cart["items"])
+        flash_claims = []
+        for item in cart["items"]:
+            sale = active_flash_sale(connection, item["id"])
+            if sale:
+                quantity = int(item["quantity"])
+                updated_sale = connection.execute(
+                    "UPDATE flash_sales SET quantity_sold=quantity_sold+? WHERE id=? AND active=1 AND quantity_sold+?<=quantity_limit",
+                    (quantity, sale["id"], quantity),
+                )
+                if updated_sale.rowcount != 1:
+                    raise ToolError("Flash Sale đã hết số lượng", 409)
+                flash_claims.append((sale["id"], quantity))
         provider_orders = []
         for item in cart["items"]:
             provider_id = item.get("providerId")
             if not provider_id:
                 continue
-            provider_row = connection.execute("SELECT * FROM product_providers WHERE id=? AND enabled=1", (provider_id,)).fetchone()
-            if not provider_row or not item.get("externalProductId"):
-                raise ToolError("Sản phẩm chưa được cấu hình nhà cung cấp", 503)
-            provider = provider_for(provider_row)
             for index in range(int(item["quantity"])):
                 provider_key = f"{user_id}:{key}:{item['id']}:{index}"
-                result = provider.create_order(item["externalProductId"], 1, provider_key, {"checkout_key": key})
-                if str(result.get("status", "fulfilled")).lower() in {"failed", "rejected", "error"}:
-                    raise ProviderError("provider_rejected", "Nhà cung cấp không nhận đơn")
+                provider_row, result = create_provider_order_with_fallback(connection, item, user_id, provider_key, 1)
                 provider_orders.append((provider_row, item, provider_key, result))
         user = connection.execute(
             "SELECT balance FROM users WHERE user_id=?", (user_id,)
@@ -1416,12 +1690,15 @@ def checkout():
             )
         if promo["code"]:
             connection.execute("INSERT INTO discount_redemptions(code,user_id,checkout_key,created_at) VALUES(?,?,?,?)", (promo["code"], user_id, key, now_iso()))
+        for sale_id, quantity in flash_claims:
+            connection.execute("INSERT INTO flash_sale_claims(sale_id,user_id,checkout_key,quantity,created_at) VALUES(?,?,?,?,?)", (sale_id, user_id, key, quantity, now_iso()))
         connection.commit()
         return jsonify({"ok": True, "duplicate": False, "orderIds": order_ids, "total": promo["final"], "originalTotal": promo["original"], "discountAmount": promo["discount"]})
     except ToolError as error:
         connection.rollback()
         return jsonify({"ok": False, "error": str(error), "reason_code": "promo_or_provider_config"}), error.status
     except ProviderError as error:
+        attempts = [dict(row) for row in connection.execute("SELECT checkout_key,provider_id,external_product_id,status,latency_ms,error_code,created_at FROM provider_attempts WHERE checkout_key LIKE ?", (f"%:{key}:%",)).fetchall()]
         for provider_row, _item, _provider_key, result in provider_orders:
             try:
                 external_id = result.get("order_id", result.get("id", ""))
@@ -1430,6 +1707,9 @@ def checkout():
             except Exception:
                 pass
         connection.rollback()
+        for attempt in attempts:
+            connection.execute("INSERT INTO provider_attempts(checkout_key,provider_id,external_product_id,status,latency_ms,error_code,created_at) VALUES(?,?,?,?,?,?,?)", tuple(attempt[field] for field in ("checkout_key", "provider_id", "external_product_id", "status", "latency_ms", "error_code", "created_at")))
+        connection.commit()
         return jsonify({"ok": False, "error": str(error), "reason_code": error.reason_code}), 502
     except sqlite3.IntegrityError:
         connection.rollback()
@@ -1586,10 +1866,13 @@ def free_cookie():
                 "UPDATE usage SET free_cookies_used=free_cookies_used+1 WHERE user_id=? AND date=?",
                 (user_id, today),
             )
+        copyright_data = copyright_payload(connection)
+        export_cookie = watermark_export(cookie["data"], copyright_data["text"], f"FREE-{user_id}-{today}", user_id, enabled=copyright_data["enabled"], netscape=True)
+        download_url = create_secure_download(connection, user_id, 0, export_cookie, f"cookie-free-{today}.txt")
         connection.commit()
         return jsonify(
             {"ok": True, "cookie": cookie["data"], "quota": quota_payload(connection, user_id),
-             "checkin": checkin_payload(connection, user_id), "copyright": copyright_payload(connection)}
+             "downloadUrl": download_url, "checkin": checkin_payload(connection, user_id), "copyright": copyright_data}
         )
     except Exception:
         connection.rollback()
@@ -1609,8 +1892,12 @@ def generate_one_nftoken(connection, user_id, mode):
         if success and token and account.get("membership_status") == "CURRENT_MEMBER":
             # The validated Cookie is a temporary delivery hold; return it to stock.
             release_cookie(connection, cookie_id, delete=False)
+            nftoken_text = f"NFToken URL: https://netflix.com/?nftoken={quote(str(token), safe='')}\n"
+            download_url = create_secure_download(connection, user_id, 0, nftoken_text, f"nftoken-{user_id}.txt")
+            connection.commit()
             return {
                 "link": f"https://netflix.com/?nftoken={quote(str(token), safe='')}",
+                "downloadUrl": download_url,
                 "account": public_account(account),
                 "netscape": netscape,
             }
@@ -1907,6 +2194,10 @@ def admin_product_values(body):
 def provider_public(row):
     return {"id": row["id"], "name": row["name"], "baseUrl": row["base_url"],
             "timeout": row["timeout"], "enabled": bool(row["enabled"]),
+            "priority": row["priority"] if "priority" in row.keys() else 100,
+            "lastErrorCode": row["last_error_code"] if "last_error_code" in row.keys() else "",
+            "lastResponseMs": row["last_response_ms"] if "last_response_ms" in row.keys() else 0,
+            "lastCheckedAt": row["last_checked_at"] if "last_checked_at" in row.keys() else None,
             "apiKeySet": bool(row["api_key"])}
 
 
@@ -1927,14 +2218,15 @@ def admin_create_provider():
         api_key = str(body.get("apiKey", ""))
         timeout = max(1, min(int(body.get("timeout", 10)), 60))
         enabled = int(bool(body.get("enabled", True)))
+        priority = max(1, min(int(body.get("priority", 100)), 10000))
     except (ValueError, TypeError) as error:
         return jsonify({"ok": False, "error": "Cấu hình provider không hợp lệ"}), 400
     if not name or urlparse(base_url).scheme not in {"http", "https"} or not urlparse(base_url).netloc:
         return jsonify({"ok": False, "error": "Base URL provider không hợp lệ"}), 400
     connection = db()
     cursor = connection.execute(
-        "INSERT INTO product_providers(name,base_url,api_key,timeout,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-        (name, base_url, api_key, timeout, enabled, now_iso(), now_iso()),
+        "INSERT INTO product_providers(name,base_url,api_key,timeout,enabled,priority,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+        (name, base_url, api_key, timeout, enabled, priority, now_iso(), now_iso()),
     )
     admin_audit(connection, "provider.create", cursor.lastrowid, name)
     connection.commit()
@@ -1950,6 +2242,7 @@ def admin_update_provider(provider_id):
         base_url = str(body.get("baseUrl", "")).strip().rstrip("/")
         timeout = max(1, min(int(body.get("timeout", 10)), 60))
         enabled = int(bool(body.get("enabled", True)))
+        priority = max(1, min(int(body.get("priority", 100)), 10000))
         api_key = body.get("apiKey")
     except (ValueError, TypeError):
         return jsonify({"ok": False, "error": "Cấu hình provider không hợp lệ"}), 400
@@ -1957,9 +2250,9 @@ def admin_update_provider(provider_id):
         return jsonify({"ok": False, "error": "Provider không hợp lệ"}), 400
     connection = db()
     if api_key is None:
-        updated = connection.execute("UPDATE product_providers SET name=?,base_url=?,timeout=?,enabled=?,updated_at=? WHERE id=?", (name, base_url, timeout, enabled, now_iso(), provider_id))
+        updated = connection.execute("UPDATE product_providers SET name=?,base_url=?,timeout=?,enabled=?,priority=?,updated_at=? WHERE id=?", (name, base_url, timeout, enabled, priority, now_iso(), provider_id))
     else:
-        updated = connection.execute("UPDATE product_providers SET name=?,base_url=?,api_key=?,timeout=?,enabled=?,updated_at=? WHERE id=?", (name, base_url, str(api_key), timeout, enabled, now_iso(), provider_id))
+        updated = connection.execute("UPDATE product_providers SET name=?,base_url=?,api_key=?,timeout=?,enabled=?,priority=?,updated_at=? WHERE id=?", (name, base_url, str(api_key), timeout, enabled, priority, now_iso(), provider_id))
     connection.commit()
     return jsonify({"ok": updated.rowcount == 1}) if updated.rowcount else (jsonify({"ok": False, "error": "Provider không tồn tại"}), 404)
 
@@ -2739,6 +3032,381 @@ def admin_update_order(order_id):
     if updated.rowcount != 1:
         return jsonify({"ok": False, "error": "Không tìm thấy đơn hàng"}), 404
     return jsonify({"ok": True})
+
+
+@app.get("/api/download/<path:token>")
+def secure_download(token):
+    payload = verify_download_token(DOWNLOAD_SECRET, token)
+    if not payload or payload["expires_at"] < int(time.time()):
+        return jsonify({"ok": False, "error": "Link tải đã hết hạn hoặc không hợp lệ"}), 404
+    connection = db()
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    connection.execute("BEGIN IMMEDIATE")
+    row = connection.execute("SELECT * FROM secure_downloads WHERE token_hash=?", (token_hash,)).fetchone()
+    if not row or row["revoked"] or row["download_count"] >= row["max_downloads"]:
+        connection.rollback()
+        return jsonify({"ok": False, "error": "Link tải đã được dùng hoặc bị vô hiệu hóa"}), 404
+    if int(row["user_id"]) != payload["user_id"] or int(row["order_id"]) != payload["order_id"]:
+        connection.rollback()
+        return jsonify({"ok": False, "error": "Link tải không hợp lệ"}), 404
+    updated = connection.execute("UPDATE secure_downloads SET download_count=download_count+1,last_downloaded_at=? WHERE id=? AND revoked=0 AND download_count<max_downloads", (now_iso(), row["id"]))
+    if updated.rowcount != 1:
+        connection.rollback()
+        return jsonify({"ok": False, "error": "Link tải đã được dùng"}), 404
+    connection.commit()
+    response = Response(bytes(row["content"]), mimetype=row["content_type"].split(";", 1)[0])
+    response.headers["Content-Disposition"] = f'attachment; filename="{safe_filename(row["filename"])}"'
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def close_expired_referral_periods(connection, now=None):
+    stamp = (now or local_now()).replace(tzinfo=None).isoformat(timespec="seconds")
+    expired = connection.execute("SELECT * FROM referral_periods WHERE status='OPEN' AND ends_at<=?", (stamp,)).fetchall()
+    for period in expired:
+        rows = connection.execute("""SELECT e.referrer_id AS user_id,COUNT(DISTINCT e.referred_id) AS qualified_count
+            FROM referral_events e JOIN users u ON u.user_id=e.referrer_id JOIN users referred ON referred.user_id=e.referred_id
+            WHERE e.status='qualified' AND u.is_banned=0 AND referred.is_banned=0 AND e.qualified_at>=? AND e.qualified_at<?
+            GROUP BY e.referrer_id ORDER BY qualified_count DESC,e.referrer_id ASC LIMIT ?""", (period["starts_at"], period["ends_at"], period["winner_limit"])).fetchall()
+        if period["reward_enabled"] and period["reward_credits"]:
+            for position, row in enumerate(rows, 1):
+                inserted = connection.execute("INSERT OR IGNORE INTO referral_period_rewards(period_id,user_id,rank_position,reward_credits,created_at) VALUES(?,?,?,?,?)", (period["id"], row["user_id"], position, period["reward_credits"], now_iso()))
+                if inserted.rowcount:
+                    connection.execute("UPDATE users SET nftoken_credits=nftoken_credits+? WHERE user_id=? AND is_banned=0", (period["reward_credits"], row["user_id"]))
+                    notify(connection, row["user_id"], "referral", "Thưởng bảng xếp hạng referral", f"Bạn nhận {period['reward_credits']} lượt NFToken.", {"period": period["period_key"], "rank": position})
+        connection.execute("UPDATE referral_periods SET status='CLOSED',closed_at=? WHERE id=?", (stamp, period["id"]))
+
+
+def ensure_referral_period(connection, period_type, now=None):
+    close_expired_referral_periods(connection, now)
+    period_type = str(period_type).upper()
+    start, end = period_bounds(period_type, now)
+    key = period_key(period_type, now)
+    connection.execute(
+        """INSERT OR IGNORE INTO referral_periods(period_type,period_key,starts_at,ends_at,created_at)
+           VALUES(?,?,?,?,?)""",
+        (period_type, key, start.isoformat(timespec="seconds"), end.isoformat(timespec="seconds"), now_iso()),
+    )
+    return connection.execute("SELECT * FROM referral_periods WHERE period_type=? AND period_key=?", (period_type, key)).fetchone()
+
+
+def referral_leaderboard_payload(connection, user_id, period_type="WEEK", limit=10):
+    period = ensure_referral_period(connection, period_type)
+    limit = max(1, min(int(limit or 10), 20))
+    rows = connection.execute(
+        """SELECT e.referrer_id AS user_id, u.username,
+                  COUNT(DISTINCT e.referred_id) AS qualified_count
+           FROM referral_events e JOIN users u ON u.user_id=e.referrer_id JOIN users referred ON referred.user_id=e.referred_id
+           WHERE e.status='qualified' AND u.is_banned=0 AND referred.is_banned=0 AND e.qualified_at>=? AND e.qualified_at<?
+           GROUP BY e.referrer_id ORDER BY qualified_count DESC,e.referrer_id ASC LIMIT ?""",
+        (period["starts_at"], period["ends_at"], limit),
+    ).fetchall()
+    current = connection.execute(
+        """SELECT COUNT(*)+1 FROM (
+             SELECT e.referrer_id,COUNT(DISTINCT e.referred_id) AS count
+             FROM referral_events e JOIN users u ON u.user_id=e.referrer_id JOIN users referred ON referred.user_id=e.referred_id
+             WHERE e.status='qualified' AND u.is_banned=0 AND referred.is_banned=0 AND e.qualified_at>=? AND e.qualified_at<?
+             GROUP BY e.referrer_id HAVING count>(SELECT COUNT(DISTINCT e2.referred_id) FROM referral_events e2 JOIN users referred2 ON referred2.user_id=e2.referred_id WHERE e2.referrer_id=? AND e2.status='qualified' AND referred2.is_banned=0 AND e2.qualified_at>=? AND e2.qualified_at<?)
+        )""",
+        (period["starts_at"], period["ends_at"], user_id, period["starts_at"], period["ends_at"]),
+    ).fetchone()[0]
+    return {"period": period["period_type"], "periodKey": period["period_key"], "startsAt": period["starts_at"], "endsAt": period["ends_at"], "status": period["status"], "currentRank": int(current), "items": [{"rank": index + 1, "userId": mask_user_id(row["user_id"]), "username": row["username"] or "", "qualifiedCount": row["qualified_count"]} for index, row in enumerate(rows)]}
+
+
+@app.get("/api/referral/leaderboard")
+@authenticated
+def referral_leaderboard():
+    period_type = request.args.get("period", "WEEK").upper()
+    if period_type not in {"WEEK", "MONTH"}:
+        return jsonify({"ok": False, "error": "Chu kỳ không hợp lệ"}), 400
+    connection = db()
+    payload = referral_leaderboard_payload(connection, int(g.telegram_user["id"]), period_type, request.args.get("limit", 10))
+    connection.commit()
+    return jsonify({"ok": True, **payload})
+
+
+@app.get("/api/flash-sales")
+@authenticated
+def flash_sales():
+    rows = db().execute("SELECT f.*,s.name AS product_name,s.price AS regular_price FROM flash_sales f JOIN store s ON s.id=f.store_item_id WHERE f.active=1 ORDER BY f.ends_at ASC").fetchall()
+    return jsonify({"ok": True, "items": [{"id": row["id"], "name": row["name"], "productId": row["store_item_id"], "productName": row["product_name"], "discountPercent": row["discount_percent"], "price": flash_price(row["regular_price"], row["discount_percent"]), "regularPrice": row["regular_price"], "quantityRemaining": max(0, row["quantity_limit"] - row["quantity_sold"]), "startsAt": row["starts_at"], "endsAt": row["ends_at"], "allowPromo": bool(row["allow_promo"])} for row in rows]})
+
+
+@app.get("/api/missions")
+@authenticated
+def missions():
+    user_id = int(g.telegram_user["id"])
+    connection = db()
+    rows = connection.execute("SELECT * FROM missions WHERE active=1 ORDER BY id").fetchall()
+    claims = {row["mission_id"] for row in connection.execute("SELECT mission_id FROM mission_claims WHERE user_id=?", (user_id,)).fetchall()}
+    return jsonify({"ok": True, "items": [{"id": row["id"], "code": row["code"], "name": row["name"], "description": row["description"], "rewardCredits": row["reward_credits"], "completed": mission_progress(connection, user_id, row), "claimed": row["id"] in claims, "startsAt": row["starts_at"], "endsAt": row["ends_at"]} for row in rows]})
+
+
+@app.post("/api/missions/<int:mission_id>/claim")
+@authenticated
+def claim_mission(mission_id):
+    user_id = int(g.telegram_user["id"])
+    connection = db()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        mission = connection.execute("SELECT * FROM missions WHERE id=? AND active=1", (mission_id,)).fetchone()
+        if not mission or not mission_progress(connection, user_id, mission):
+            connection.rollback()
+            return jsonify({"ok": False, "error": "Nhiệm vụ chưa đủ điều kiện"}), 409
+        inserted = connection.execute("INSERT OR IGNORE INTO mission_claims(mission_id,user_id,claimed_at) VALUES(?,?,?)", (mission_id, user_id, now_iso()))
+        if inserted.rowcount == 0:
+            connection.rollback()
+            return jsonify({"ok": True, "duplicate": True}), 200
+        connection.execute("UPDATE users SET nftoken_credits=nftoken_credits+? WHERE user_id=?", (mission["reward_credits"], user_id))
+        notify(connection, user_id, "mission", "Nhiệm vụ hoàn tất", f"Bạn nhận {mission['reward_credits']} lượt NFToken.", {"missionId": mission_id})
+        connection.commit()
+        return jsonify({"ok": True, "rewardCredits": mission["reward_credits"]})
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+
+
+@app.get("/api/notifications")
+@authenticated
+def notifications():
+    user_id = int(g.telegram_user["id"])
+    rows = db().execute("SELECT id,kind,title,body,payload_json,is_read,created_at FROM notifications WHERE user_id=? OR user_id IS NULL ORDER BY id DESC LIMIT 100", (user_id,)).fetchall()
+    unread = sum(1 for row in rows if not row["is_read"])
+    return jsonify({"ok": True, "unread": unread, "items": [{**dict(row), "payload": json.loads(row["payload_json"] or "{}")} for row in rows]})
+
+
+@app.post("/api/notifications/read")
+@authenticated
+def mark_notifications_read():
+    user_id = int(g.telegram_user["id"])
+    body = json_body()
+    connection = db()
+    if body.get("all"):
+        connection.execute("UPDATE notifications SET is_read=1 WHERE user_id=? OR user_id IS NULL", (user_id,))
+    else:
+        ids = [int(value) for value in body.get("ids", []) if str(value).isdigit()][:100]
+        if ids:
+            connection.execute(f"UPDATE notifications SET is_read=1 WHERE id IN ({','.join('?' for _ in ids)}) AND (user_id=? OR user_id IS NULL)", (*ids, user_id))
+    connection.commit()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/preferences/language")
+@authenticated
+def get_language():
+    user_id = int(g.telegram_user["id"])
+    row = db().execute("SELECT language FROM user_preferences WHERE user_id=?", (user_id,)).fetchone()
+    return jsonify({"ok": True, "language": normalize_language(row[0] if row else g.telegram_user.get("language_code", "vi")), "supported": ["vi", "en"]})
+
+
+@app.put("/api/preferences/language")
+@authenticated
+def set_language():
+    language = normalize_language(json_body().get("language"), "")
+    if language not in {"vi", "en"}:
+        return jsonify({"ok": False, "error": "Ngôn ngữ không được hỗ trợ"}), 400
+    connection = db()
+    connection.execute("INSERT INTO user_preferences(user_id,language,updated_at) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET language=excluded.language,updated_at=excluded.updated_at", (int(g.telegram_user["id"]), language, now_iso()))
+    connection.execute("UPDATE users SET language=? WHERE user_id=?", (language, int(g.telegram_user["id"])))
+    connection.commit()
+    return jsonify({"ok": True, "language": language})
+
+
+@app.get("/api/admin/referral-leaderboards")
+@admin_required
+def admin_referral_leaderboards():
+    connection = db()
+    items = []
+    for period_type in ("WEEK", "MONTH"):
+        period = ensure_referral_period(connection, period_type)
+        payload = referral_leaderboard_payload(connection, configured_admin_id(), period_type, 20)
+        items.append({"settings": {"periodType": period_type, "rewardEnabled": bool(period["reward_enabled"]), "rewardCredits": period["reward_credits"], "winnerLimit": period["winner_limit"]}, **payload})
+    connection.commit()
+    return jsonify({"ok": True, "items": items})
+
+
+@app.put("/api/admin/referral-leaderboards/<period_type>")
+@admin_required
+def admin_update_referral_leaderboard(period_type):
+    period_type = period_type.upper()
+    if period_type not in {"WEEK", "MONTH"}:
+        return jsonify({"ok": False, "error": "Chu kỳ không hợp lệ"}), 400
+    body = json_body()
+    connection = db()
+    period = ensure_referral_period(connection, period_type)
+    enabled = int(bool(body.get("rewardEnabled", False)))
+    credits = max(0, min(int(body.get("rewardCredits", 0)), 10**6))
+    limit = max(1, min(int(body.get("winnerLimit", 10)), 20))
+    connection.execute("UPDATE referral_periods SET reward_enabled=?,reward_credits=?,winner_limit=? WHERE id=?", (enabled, credits, limit, period["id"]))
+    admin_audit(connection, "referral_leaderboard.update", period_type, f"enabled={enabled},credits={credits},limit={limit}")
+    connection.commit()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/admin/flash-sales")
+@admin_required
+def admin_flash_sales():
+    rows = db().execute("SELECT f.*,s.name AS product_name FROM flash_sales f JOIN store s ON s.id=f.store_item_id ORDER BY f.id DESC").fetchall()
+    return jsonify({"ok": True, "items": [dict(row) for row in rows]})
+
+
+@app.post("/api/admin/flash-sales")
+@admin_required
+def admin_create_flash_sale():
+    try:
+        body = json_body()
+        name = str(body.get("name", "")).strip()[:100]
+        item_id = int(body.get("productId"))
+        percent = int(body.get("discountPercent", 0))
+        quantity = int(body.get("quantityLimit", 0))
+        starts_at = datetime.fromisoformat(str(body.get("startsAt"))).replace(tzinfo=None).isoformat(timespec="seconds")
+        ends_at = datetime.fromisoformat(str(body.get("endsAt"))).replace(tzinfo=None).isoformat(timespec="seconds")
+        allow_promo = int(bool(body.get("allowPromo", False)))
+    except (ValueError, TypeError):
+        return jsonify({"ok": False, "error": "Thông tin Flash Sale không hợp lệ"}), 400
+    if not name or not 1 <= percent < 100 or quantity <= 0 or ends_at <= starts_at:
+        return jsonify({"ok": False, "error": "Flash Sale phải có giảm giá, số lượng và thời gian hợp lệ"}), 400
+    connection = db()
+    if not connection.execute("SELECT 1 FROM store WHERE id=? AND active=1", (item_id,)).fetchone():
+        return jsonify({"ok": False, "error": "Sản phẩm không tồn tại"}), 404
+    cursor = connection.execute("INSERT INTO flash_sales(name,store_item_id,discount_percent,quantity_limit,starts_at,ends_at,allow_promo,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)", (name, item_id, percent, quantity, starts_at, ends_at, allow_promo, now_iso(), now_iso()))
+    admin_audit(connection, "flash_sale.create", cursor.lastrowid, name)
+    connection.commit()
+    return jsonify({"ok": True, "id": cursor.lastrowid})
+
+
+@app.put("/api/admin/flash-sales/<int:sale_id>")
+@admin_required
+def admin_update_flash_sale(sale_id):
+    body = json_body()
+    connection = db()
+    row = connection.execute("SELECT * FROM flash_sales WHERE id=?", (sale_id,)).fetchone()
+    if not row:
+        return jsonify({"ok": False, "error": "Flash Sale không tồn tại"}), 404
+    fields = {"active": int(bool(body.get("active", row["active"]))), "allow_promo": int(bool(body.get("allowPromo", row["allow_promo"]))) }
+    if "quantityLimit" in body:
+        fields["quantity_limit"] = max(int(row["quantity_sold"]), int(body["quantityLimit"]))
+    connection.execute("UPDATE flash_sales SET active=?,allow_promo=?,quantity_limit=?,updated_at=? WHERE id=?", (fields["active"], fields["allow_promo"], fields.get("quantity_limit", row["quantity_limit"]), now_iso(), sale_id))
+    admin_audit(connection, "flash_sale.update", sale_id, f"active={fields['active']}")
+    connection.commit()
+    return jsonify({"ok": True})
+
+
+def report_filters(connection):
+    where = ["1=1"]
+    params = []
+    start = request.args.get("start", "").strip()
+    end = request.args.get("end", "").strip()
+    status = request.args.get("status", "").strip().upper()
+    product_id = request.args.get("productId", "").strip()
+    provider_id = request.args.get("providerId", "").strip()
+    if start:
+        where.append("date>=?"); params.append(start)
+    if end:
+        where.append("date<?"); params.append(end)
+    if status:
+        where.append("status=?"); params.append(status)
+    if product_id.isdigit():
+        where.append("store_item_id=?"); params.append(int(product_id))
+    if provider_id.isdigit():
+        where.append("provider_id=?"); params.append(int(provider_id))
+    return " AND ".join(where), params
+
+
+@app.get("/api/admin/reports")
+@admin_required
+def admin_reports():
+    where, params = report_filters(db())
+    connection = db()
+    if request.args.get("format") == "csv":
+        rows = connection.execute(f"SELECT id,user_id,store_item_id,plan_name,price,status,date,quantity,final_price,discount_amount,promo_code,provider_id FROM purchase_history WHERE {where} ORDER BY id DESC", params).fetchall()
+        fields = ["id", "user_id", "store_item_id", "plan_name", "price", "status", "date", "quantity", "final_price", "discount_amount", "promo_code", "provider_id"]
+        return Response(csv_bytes([dict(row) for row in rows], fields), mimetype="text/csv; charset=utf-8", headers={"Content-Disposition": "attachment; filename=reports.csv"})
+    summary = connection.execute(f"SELECT COUNT(*) AS orders,COALESCE(SUM(CASE WHEN status IN ('COMPLETED','FULFILLED') THEN COALESCE(final_price,price) ELSE 0 END),0) AS revenue,COALESCE(SUM(discount_amount),0) AS discounts,COALESCE(SUM(quantity),0) AS units FROM purchase_history WHERE {where}", params).fetchone()
+    status_counts = connection.execute(f"SELECT status,COUNT(*) AS count FROM purchase_history WHERE {where} GROUP BY status", params).fetchall()
+    by_product = connection.execute(f"SELECT store_item_id,plan_name,COUNT(*) AS orders,COALESCE(SUM(quantity),0) AS units,COALESCE(SUM(CASE WHEN status IN ('COMPLETED','FULFILLED') THEN COALESCE(final_price,price) ELSE 0 END),0) AS revenue FROM purchase_history WHERE {where} GROUP BY store_item_id,plan_name ORDER BY units DESC LIMIT 20", params).fetchall()
+    by_provider = connection.execute(f"SELECT provider_id,COUNT(*) AS orders,COALESCE(SUM(CASE WHEN status IN ('COMPLETED','FULFILLED') THEN COALESCE(final_price,price) ELSE 0 END),0) AS revenue FROM purchase_history WHERE {where} GROUP BY provider_id ORDER BY revenue DESC", params).fetchall()
+    return jsonify({"ok": True, "summary": dict(summary), "statusCounts": {row["status"]: row["count"] for row in status_counts}, "products": [dict(row) for row in by_product], "providers": [dict(row) for row in by_provider]})
+
+
+@app.post("/api/admin/notifications")
+@admin_required
+def admin_create_notification():
+    body = json_body()
+    title = str(body.get("title", "")).strip()[:200]
+    message = str(body.get("body", "")).strip()[:2000]
+    user_id = body.get("userId")
+    if not title or not message:
+        return jsonify({"ok": False, "error": "Thông báo không được trống"}), 400
+    connection = db()
+    notify(connection, int(user_id) if str(user_id or "").isdigit() else None, "admin", title, message)
+    admin_audit(connection, "notification.create", user_id or "all", title)
+    connection.commit()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/admin/notifications")
+@admin_required
+def admin_notifications():
+    rows = db().execute("SELECT id,user_id,kind,title,body,is_read,created_at FROM notifications ORDER BY id DESC LIMIT 100").fetchall()
+    return jsonify({"ok": True, "items": [dict(row) for row in rows]})
+
+
+@app.post("/api/admin/secure-downloads/<int:download_id>/revoke")
+@admin_required
+def admin_revoke_download(download_id):
+    connection = db()
+    updated = connection.execute("UPDATE secure_downloads SET revoked=1 WHERE id=?", (download_id,))
+    admin_audit(connection, "download.revoke", download_id, "")
+    connection.commit()
+    return jsonify({"ok": updated.rowcount == 1})
+
+
+@app.post("/api/admin/missions")
+@admin_required
+def admin_create_mission():
+    body = json_body()
+    code = str(body.get("code", "")).strip().lower()[:50]
+    name = str(body.get("name", "")).strip()[:150]
+    description = str(body.get("description", "")).strip()[:500]
+    condition = body.get("condition") if isinstance(body.get("condition"), dict) else {}
+    reward = max(0, int(body.get("rewardCredits", 0)))
+    if not code or not name:
+        return jsonify({"ok": False, "error": "Nhiệm vụ thiếu mã hoặc tên"}), 400
+    connection = db()
+    try:
+        cursor = connection.execute("INSERT INTO missions(code,name,description,condition_json,reward_credits,starts_at,ends_at,max_claims,active,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (code, name, description, json.dumps(condition, ensure_ascii=False), reward, body.get("startsAt"), body.get("endsAt"), max(0, int(body.get("maxClaims", 0))), int(bool(body.get("active", True))), now_iso(), now_iso()))
+        admin_audit(connection, "mission.create", cursor.lastrowid, code)
+        connection.commit()
+    except sqlite3.IntegrityError:
+        connection.rollback()
+        return jsonify({"ok": False, "error": "Mã nhiệm vụ đã tồn tại"}), 409
+    return jsonify({"ok": True, "id": cursor.lastrowid})
+
+
+@app.get("/api/admin/missions")
+@admin_required
+def admin_missions():
+    rows = db().execute("SELECT * FROM missions ORDER BY id DESC").fetchall()
+    return jsonify({"ok": True, "items": [dict(row) for row in rows]})
+
+
+@app.put("/api/admin/missions/<int:mission_id>")
+@admin_required
+def admin_update_mission(mission_id):
+    body = json_body()
+    connection = db()
+    updated = connection.execute("UPDATE missions SET name=?,description=?,reward_credits=?,active=?,updated_at=? WHERE id=?", (str(body.get("name", "")).strip()[:150], str(body.get("description", "")).strip()[:500], max(0, int(body.get("rewardCredits", 0))), int(bool(body.get("active", True))), now_iso(), mission_id))
+    admin_audit(connection, "mission.update", mission_id, "")
+    connection.commit()
+    return jsonify({"ok": updated.rowcount == 1})
+
+
+@app.get("/api/admin/provider-attempts")
+@admin_required
+def admin_provider_attempts():
+    rows = db().execute("SELECT checkout_key,provider_id,external_product_id,status,latency_ms,error_code,created_at FROM provider_attempts ORDER BY id DESC LIMIT 200").fetchall()
+    return jsonify({"ok": True, "items": [dict(row) for row in rows]})
 
 
 @app.errorhandler(404)

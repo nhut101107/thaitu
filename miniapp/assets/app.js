@@ -1,7 +1,7 @@
 import {api} from "./api.js?v=11";
 import {state, subscribe, update} from "./state.js";
 import {bottomNav, header, toast} from "./components.js";
-import {accountView, addToCart, claimFreeCookie, homeView, openCart, openCheckin, openDeposit, openGiftcode, openHelp, openNftoken, openOrder, openProduct, openReferral, openSupport, openTvLogin, ordersView, storeView, toolsView} from "./views.js?v=11";
+import {accountView, addToCart, claimFreeCookie, homeView, openCart, openCheckin, openDeposit, openGiftcode, openHelp, openMissions, openNftoken, openNotifications, openOrder, openProduct, openReferral, openSupport, openTvLogin, ordersView, storeView, toolsView} from "./views.js?v=11";
 import {adminView, bindAdminEvents, loadAdmin} from "./admin.js?v=11";
 
 const tg = window.Telegram?.WebApp;
@@ -9,6 +9,9 @@ const app = document.querySelector("#app");
 const loading = document.querySelector("#loading");
 const content = document.querySelector("#content");
 let searchTimer;
+let deferredInstallPrompt;
+
+window.addEventListener("beforeinstallprompt", (event) => { event.preventDefault(); deferredInstallPrompt = event; });
 
 if (tg) {
   tg.ready();
@@ -58,11 +61,14 @@ function bindEvents() {
   document.querySelectorAll("[data-product]").forEach((node) => node.onclick = (event) => { if (!event.target.closest("[data-add]")) openProduct(node.dataset.product); });
   document.querySelectorAll("[data-add]").forEach((node) => node.onclick = (event) => { event.stopPropagation(); addToCart(node.dataset.add); });
   document.querySelectorAll("[data-order]").forEach((node) => node.onclick = () => openOrder(node.dataset.order));
-  const toolActions = {tv: openTvLogin, "plan-token": () => openNftoken("plan"), "vip-token": () => openNftoken("vip"), "free-cookie": claimFreeCookie, checkin: openCheckin, referral: openReferral, giftcode: openGiftcode, deposit: openDeposit, support: openSupport, help: openHelp};
+  const toolActions = {tv: openTvLogin, "plan-token": () => openNftoken("plan"), "vip-token": () => openNftoken("vip"), "free-cookie": claimFreeCookie, checkin: openCheckin, missions: openMissions, referral: openReferral, giftcode: openGiftcode, deposit: openDeposit, support: openSupport, help: openHelp};
   document.querySelectorAll("[data-tool]").forEach((node) => node.onclick = () => toolActions[node.dataset.tool]?.());
   document.querySelectorAll("[data-action='cart']").forEach((node) => node.onclick = openCart);
   document.querySelectorAll("[data-action='deposit']").forEach((node) => node.onclick = openDeposit);
   document.querySelectorAll("[data-action='support']").forEach((node) => node.onclick = openSupport);
+  document.querySelectorAll("[data-action='notifications']").forEach((node) => node.onclick = openNotifications);
+  document.querySelectorAll("[data-action='install']").forEach((node) => node.onclick = async () => { if (!deferredInstallPrompt) return toast("Trình duyệt chưa hỗ trợ cài PWA"); deferredInstallPrompt.prompt(); await deferredInstallPrompt.userChoice; deferredInstallPrompt = null; });
+  document.querySelector("[data-language]")?.addEventListener("change", async (event) => { try { await api.setLanguage(event.target.value); state.bootstrap.user.language = event.target.value; render(); } catch (error) { toast(error.message, "error"); } });
   document.querySelectorAll("[data-action='search']").forEach((node) => node.onclick = () => navigate("store").then(() => document.querySelector("#product-search")?.focus()));
   document.querySelectorAll("[data-action='reload-orders']").forEach((node) => node.onclick = loadOrders);
   document.querySelectorAll("[data-category]").forEach((node) => node.onclick = () => { state.category = node.dataset.category; loadProducts(); });
@@ -95,3 +101,9 @@ async function boot() {
 }
 
 boot();
+
+setInterval(() => { if (state.bootstrap) api.notifications().catch(() => {}); }, 60000);
+
+if ("serviceWorker" in navigator && !window.Telegram?.WebApp) {
+  window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
+}

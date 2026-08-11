@@ -55,6 +55,7 @@ export function toolsView() {
     ["🍪", "Rút Cookie VIP", `${quota.credits || 0} lượt đã mua`, "vip-token", flags.vipToken],
     ["🎁", "Cookie miễn phí", `${quota.freeCookiesUsed || 0}/${quota.freeCookiesMax || 0} lượt hôm nay`, "free-cookie", flags.freeCookie],
     ["✅", "Điểm danh Cookie Free", `${state.bootstrap.checkin?.remaining || 0}/${state.bootstrap.checkin?.daily || 2} lượt còn lại hôm nay`, "checkin", true],
+    ["🎯", "Nhiệm vụ nhận thưởng", "Hoàn thành nhiệm vụ để nhận lượt NFToken", "missions", true],
     ["🔗", "Giới thiệu bạn bè", `${state.bootstrap.referral?.count || 0}/5 người hợp lệ · nhận 2 lượt NFToken`, "referral", true],
     ["🎟", "Nhập mã quà tặng", "Cộng số dư trực tiếp", "giftcode", flags.giftcode],
     ["💸", "Nạp tiền", "Tạo QR và yêu cầu duyệt", "deposit", flags.deposit],
@@ -70,6 +71,7 @@ export function accountView() {
   const avatar = user.photoUrl ? `<img src="${escapeHtml(user.photoUrl)}" alt="">` : initials;
   return `<div class="page account-page"><div class="profile-hero"><div class="profile-avatar">${avatar}</div><h1>${escapeHtml(`${user.firstName} ${user.lastName}`.trim())}</h1><p>${user.username ? `@${escapeHtml(user.username)}` : "Chưa đặt username"}</p><span>♕ ${escapeHtml(user.plan)}</span></div>
     <section class="panel account-list"><header><h2>Tài khoản</h2><small>An toàn & bảo mật</small></header><button data-action="deposit"><i>${icon("wallet")}</i><span><b>Số dư ví</b><small>${formatMoney(user.balance)} · Chạm để nạp</small></span>${icon("arrow")}</button><button><i>⚡</i><span><b>Lượt tạo link NFToken</b><small>${user.nftokenCredits || 0} lượt đã mua</small></span></button><button><i>🍪</i><span><b>Lượt lấy Cookie VIP</b><small>${user.credits} lượt đã mua</small></span></button><button data-route="orders"><i>${icon("orders")}</i><span><b>Lịch sử đơn hàng</b><small>${user.orderCount} đơn đã mua</small></span>${icon("arrow")}</button><button data-action="support"><i>${icon("account")}</i><span><b>Hỗ trợ trực tiếp</b><small>Gửi yêu cầu ngay trong app</small></span>${icon("arrow")}</button></section>
+    <section class="panel language-panel"><label class="field">Ngôn ngữ<select data-language><option value="vi" ${user.language === "vi" ? "selected" : ""}>Tiếng Việt</option><option value="en" ${user.language === "en" ? "selected" : ""}>English</option></select></label></section>
     ${state.bootstrap.isAdmin ? `<button class="admin-entry" data-route="admin"><i>♛</i><span><b>Trung tâm quản trị</b><small>Quản lý toàn bộ hệ thống ngay trong Mini App</small></span>${icon("arrow")}</button>` : ""}
     <section class="panel commitments"><header><h2>Chính sách & cam kết</h2></header><p>♢ <span><b>Minh bạch gói dịch vụ</b><small>Thông tin lượt và giá được đọc trực tiếp từ hệ thống.</small></span></p><p>⚡ <span><b>Giao lượt tức thì</b><small>Lượt Cookie được cộng sau khi giao dịch thành công.</small></span></p><p>▣ <span><b>Chỉ xử lý sau thanh toán</b><small>Backend kiểm tra lại giá và số dư trong một transaction.</small></span></p></section>
     <section class="panel membership"><h2>Hạng ${escapeHtml(user.plan)}</h2><p>Telegram ID: ${user.id}</p><div><i style="width:${Math.min(100, user.spent / 10000)}%"></i></div></section></div>`;
@@ -99,9 +101,9 @@ export function openCart() {
 }
 
 function confirmCheckout(closeCart) {
-  modal(`<div class="confirm-icon">${icon("shield")}</div><h2>Xác nhận thanh toán?</h2><p>Backend sẽ kiểm tra lại giá, sản phẩm và số dư trước khi tạo đơn.</p><div class="cart-total"><span>Tổng cộng</span><b>${formatMoney(state.cart.total)}</b></div><button class="button wide" data-confirm-checkout>Mua ngay</button>`, {onOpen(root, close) { root.querySelector("[data-confirm-checkout]").onclick = async (event) => {
+  modal(`<div class="confirm-icon">${icon("shield")}</div><h2>Xác nhận thanh toán?</h2><p>Backend sẽ kiểm tra lại giá, sản phẩm và số dư trước khi tạo đơn.</p><label class="field">Mã giảm giá (không bắt buộc)<input id="checkout-promo" maxlength="50" autocomplete="off" placeholder="Nhập mã giảm giá"></label><div class="cart-total"><span>Tổng cộng</span><b>${formatMoney(state.cart.total)}</b></div><button class="button wide" data-confirm-checkout>Mua ngay</button>`, {onOpen(root, close) { root.querySelector("[data-confirm-checkout]").onclick = async (event) => {
     if (state.busy) return; state.busy = true; event.currentTarget.disabled = true;
-    try { const key = crypto.randomUUID().replaceAll("-", ""); const promoCode = window.prompt("Mã giảm giá (bỏ trống nếu không có)", "") || ""; const result = await api.checkout(key, promoCode); update({cart:{items:[],count:0,total:0}}); close(); closeCart(); toast(`Thanh toán thành công ${formatMoney(result.total)}`); }
+    try { const key = crypto.randomUUID().replaceAll("-", ""); const promoCode = root.querySelector("#checkout-promo")?.value.trim() || ""; const result = await api.checkout(key, promoCode); update({cart:{items:[],count:0,total:0}}); close(); closeCart(); toast(`Thanh toán thành công ${formatMoney(result.total)}`); }
     catch (error) { toast(error.message, "error"); event.currentTarget.disabled = false; }
     finally { state.busy = false; }
   }; }});
@@ -149,7 +151,7 @@ export function openNftoken(mode = "plan") {
       const done = busyButton(event.currentTarget); const quantity = Number(root.querySelector("#tool-quantity")?.value || 1);
       try {
         const result = await api.nftoken(mode, quantity); syncQuota(result.quota); close();
-        modal(`<div class="confirm-icon">✓</div><h2>Tạo thành công ${result.items.length} NFToken</h2>${result.items.map((item, index) => `<article class="token-result"><b>Tài khoản ${index + 1}</b>${accountSummary(item.account)}<a class="button wide" href="${escapeHtml(item.link)}" target="_blank" rel="noopener">Mở Netflix</a><button class="button secondary wide" data-copy-link="${escapeHtml(item.link)}">Sao chép link</button></article>`).join("")}`, {onOpen(resultRoot) { resultRoot.querySelectorAll("[data-copy-link]").forEach((button) => button.onclick = () => navigator.clipboard.writeText(button.dataset.copyLink).then(() => toast("Đã sao chép link"))); }});
+        modal(`<div class="confirm-icon">✓</div><h2>Tạo thành công ${result.items.length} NFToken</h2>${result.items.map((item, index) => `<article class="token-result"><b>Tài khoản ${index + 1}</b>${accountSummary(item.account)}<a class="button wide" href="${escapeHtml(item.link)}" target="_blank" rel="noopener">Mở Netflix</a>${item.downloadUrl ? `<a class="button secondary wide" href="${escapeHtml(item.downloadUrl)}">Tải file NFToken bảo mật</a>` : ""}<button class="button secondary wide" data-copy-link="${escapeHtml(item.link)}">Sao chép link</button></article>`).join("")}`, {onOpen(resultRoot) { resultRoot.querySelectorAll("[data-copy-link]").forEach((button) => button.onclick = () => navigator.clipboard.writeText(button.dataset.copyLink).then(() => toast("Đã sao chép link"))); }});
       } catch (error) { toast(error.message, "error"); done(); }
     };
   }});
@@ -159,7 +161,7 @@ export function claimFreeCookie() {
   modal(`<div class="confirm-icon">🎁</div><h2>Cookie miễn phí</h2><p>Cookie được lấy theo đúng hạn mức gói của bạn.</p><button class="button wide" data-claim-free>Nhận Cookie ngay</button>`, {onOpen(root, close) {
     root.querySelector("[data-claim-free]").onclick = async (event) => {
       const done = busyButton(event.currentTarget);
-      try { const result = await api.freeCookie(); syncQuota(result.quota); close(); modal(`<div class="confirm-icon">✓</div><h2>Cookie của bạn</h2><p class="privacy-banner">${escapeHtml(result.copyright?.text || "© mnhut - NFToken Pro")}</p><textarea class="result-text" readonly>${escapeHtml(result.cookie)}</textarea><button class="button wide" data-copy-cookie>Sao chép Cookie</button>`, {onOpen(resultRoot) { resultRoot.querySelector("[data-copy-cookie]").onclick = () => navigator.clipboard.writeText(result.cookie).then(() => toast("Đã sao chép Cookie")); }}); }
+      try { const result = await api.freeCookie(); syncQuota(result.quota); close(); modal(`<div class="confirm-icon">✓</div><h2>Cookie của bạn</h2><p class="privacy-banner">${escapeHtml(result.copyright?.text || "© mnhut - NFToken Pro")}</p><textarea class="result-text" readonly>${escapeHtml(result.cookie)}</textarea>${result.downloadUrl ? `<a class="button wide" href="${escapeHtml(result.downloadUrl)}">Tải Cookie bảo mật</a>` : ""}<button class="button secondary wide" data-copy-cookie>Sao chép Cookie</button>`, {onOpen(resultRoot) { resultRoot.querySelector("[data-copy-cookie]").onclick = () => navigator.clipboard.writeText(result.cookie).then(() => toast("Đã sao chép Cookie")); }}); }
       catch (error) { toast(error.message, "error"); done(); }
     };
   }});
@@ -216,6 +218,21 @@ export function openCheckin() {
 export function openReferral() {
   const referral = state.bootstrap.referral || {};
   modal(`<div class="confirm-icon">🔗</div><h2>Giới thiệu bạn bè</h2><p>Đã có ${referral.count || 0}/5 người hợp lệ. Đủ 5 người sẽ nhận đúng 2 lượt NFToken.</p><label class="field">Link giới thiệu<input readonly value="${escapeHtml(referral.link || "")}"></label><button class="button wide" data-copy-referral>Sao chép link</button>`, {onOpen(root) { root.querySelector("[data-copy-referral]").onclick = () => navigator.clipboard.writeText(referral.link || "").then(() => toast("Đã sao chép link")); }});
+}
+
+export async function openNotifications() {
+  try {
+    const result = await api.notifications();
+    modal(`<div class="eyebrow">NFToken Pro</div><h2>Thông báo</h2>${result.items.length ? result.items.map((item) => `<article class="notification-item ${item.is_read ? "read" : "unread"}"><b>${escapeHtml(item.title)}</b><p>${escapeHtml(item.body)}</p><small>${escapeHtml(item.created_at)}</small></article>`).join("") : emptyState("Chưa có thông báo", "Thông báo hệ thống sẽ xuất hiện tại đây.")}<button class="button secondary wide" data-read-all>Đánh dấu đã đọc</button>`, {onOpen(root) { root.querySelector("[data-read-all]")?.addEventListener("click", async () => { await api.markNotificationsRead([], true); toast("Đã đánh dấu đã đọc"); }); }});
+    if (result.unread) await api.markNotificationsRead([], true);
+  } catch (error) { toast(error.message, "error"); }
+}
+
+export async function openMissions() {
+  try {
+    const result = await api.missions();
+    modal(`<div class="eyebrow">NFToken Pro</div><h2>Nhiệm vụ</h2>${result.items.map((mission) => `<article class="notification-item"><b>${escapeHtml(mission.name)}</b><p>${escapeHtml(mission.description)}</p><small>${mission.claimed ? "Đã nhận" : mission.completed ? "Đủ điều kiện" : "Chưa hoàn thành"}</small>${mission.completed && !mission.claimed ? `<button class="button wide" data-claim-mission="${mission.id}">Nhận ${mission.rewardCredits} lượt NFToken</button>` : ""}</article>`).join("")}`, {onOpen(root, close) { root.querySelectorAll("[data-claim-mission]").forEach((button) => button.onclick = async () => { try { await api.claimMission(button.dataset.claimMission); close(); toast("Đã nhận thưởng nhiệm vụ"); } catch (error) { toast(error.message, "error"); } }); }});
+  } catch (error) { toast(error.message, "error"); }
 }
 
 export function openGiftcode() {

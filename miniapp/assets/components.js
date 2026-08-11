@@ -1,3 +1,5 @@
+import {state} from "./state.js";
+
 const money = new Intl.NumberFormat("vi-VN");
 export const formatMoney = (value) => `${money.format(Number(value || 0))} ₫`;
 export const escapeHtml = (value = "") => String(value).replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
@@ -23,19 +25,20 @@ export function icon(name) {
 export function header(user) {
   const initials = escapeHtml((user.firstName || "N")[0].toUpperCase());
   const avatar = user.photoUrl ? `<img src="${escapeHtml(user.photoUrl)}" alt="">` : initials;
-  return `<div class="topbar"><div class="logo"><span class="brand-mark small">N</span><div><b>NFToken</b><small>PREMIUM STORE</small></div></div><div class="header-actions"><button data-action="search" aria-label="Tìm kiếm">${icon("search")}</button><button class="avatar" data-route="account">${avatar}</button></div></div>`;
+  return `<div class="topbar"><div class="logo"><span class="brand-mark small">N</span><div><b>NFToken</b><small>PREMIUM STORE</small></div></div><div class="header-actions"><button data-action="search" aria-label="Tìm kiếm">${icon("search")}</button><button data-action="notifications" aria-label="Thông báo">${icon("account")}</button><button data-action="install" aria-label="Cài ứng dụng">＋</button><button class="avatar" data-route="account">${avatar}</button></div></div>`;
 }
 
 export function bottomNav(route) {
-  const items = [["home","home","Trang chủ"],["store","store","Cửa hàng"],["orders","orders","Đơn hàng"],["tools","tools","Tiện ích"],["account","account","Tài khoản"]];
+  const items = state.bootstrap?.user?.language === "en" ? [["home","home","Home"],["store","store","Store"],["orders","orders","Orders"],["tools","tools","Tools"],["account","account","Account"]] : [["home","home","Trang chủ"],["store","store","Cửa hàng"],["orders","orders","Đơn hàng"],["tools","tools","Tiện ích"],["account","account","Tài khoản"]];
   return items.map(([key, glyph, label]) => `<button data-route="${key}" class="${route === key ? "active" : ""}">${icon(glyph)}<span>${label}</span></button>`).join("");
 }
 
 export function productCard(item) {
   const totalBenefits = (item.nftokenCredits || 0) + (item.credits || 0);
+  const sale = item.flashSale;
   const fallback = `<div class="product-placeholder" ${item.imageUrl ? "hidden" : ""}><span>N</span><small>${totalBenefits} lượt</small></div>`;
   const image = item.imageUrl ? `<img src="${escapeHtml(item.imageUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.hidden=true;this.nextElementSibling.hidden=false">${fallback}` : fallback;
-  return `<article class="product-card" data-product="${item.id}"><div class="product-image">${image}${item.featured ? '<em>Nổi bật</em>' : ''}</div><h3>${escapeHtml(item.name)}</h3><p>${icon("shield")} ${item.available ? "Đang bán" : "Tạm hết"} · ${item.warrantyDays ? `${item.warrantyDays} ngày BH` : "Giao tự động"}</p><footer><strong>${formatMoney(item.price)}</strong><button data-add="${item.id}" aria-label="Thêm vào giỏ">${icon("plus")}</button></footer></article>`;
+  return `<article class="product-card" data-product="${item.id}"><div class="product-image">${image}${item.featured ? '<em>Nổi bật</em>' : ''}${sale ? `<em class="flash-sale-badge">FLASH -${sale.discountPercent}%</em>` : ''}</div><h3>${escapeHtml(item.name)}</h3><p>${icon("shield")} ${item.available ? "Đang bán" : "Tạm hết"} · ${item.warrantyDays ? `${item.warrantyDays} ngày BH` : "Giao tự động"}${sale ? ` · còn ${sale.quantityRemaining}` : ""}</p><footer><strong>${formatMoney(item.price)}</strong><button data-add="${item.id}" aria-label="Thêm vào giỏ">${icon("plus")}</button></footer></article>`;
 }
 
 export function emptyState(title, text, action = "") {
