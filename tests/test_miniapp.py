@@ -69,6 +69,13 @@ class MiniAppTest(unittest.TestCase):
         self.assertEqual(response.json["brand"]["name"], "Shop MMO")
         self.assertEqual(response.json["brand"]["tagline"], "Premium MMO Store")
 
+    def test_cookie_check_has_hard_timeout(self):
+        with patch("code_goc.checker.extract_cookies_from_text", return_value=[{"NetflixId": "safe"}]), patch(
+            "code_goc.checker.check_cookie", side_effect=lambda _cookies: time.sleep(0.2)
+        ):
+            result = miniapp_server.run_cookie_check("NetflixId=safe", timeout=0.01)
+        self.assertEqual(result[2], "network_timeout")
+
     def test_checkout_is_atomic_and_idempotent(self):
         response = self.client.put("/api/cart/1", json={"quantity": 2}, headers=self.headers)
         self.assertEqual(response.status_code, 200)

@@ -11,7 +11,7 @@ import time
 import uuid
 import zipfile
 import rarfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError, as_completed
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from urllib.error import URLError
@@ -64,6 +64,8 @@ CHECKOUT_ATTEMPTS = {}
 CHECKOUT_LOCK = threading.Lock()
 TOOL_ATTEMPTS = {}
 TOOL_LOCK = threading.Lock()
+COOKIE_CHECK_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="nftoken-check")
+COOKIE_CHECK_TIMEOUT = max(10, min(int(os.getenv("MINIAPP_COOKIE_CHECK_TIMEOUT", "45")), 90))
 MIGRATION_LOCK = threading.Lock()
 MIGRATED_PATHS = set()
 try:
@@ -924,7 +926,7 @@ def release_cookie(connection, cookie_id, delete=False):
     connection.commit()
 
 
-def run_cookie_check(cookie_data):
+def run_cookie_check(cookie_data, timeout=None):
     """Lazy import keeps normal Mini App startup light and makes the checker testable."""
     from code_goc import checker
 
@@ -932,7 +934,14 @@ def run_cookie_check(cookie_data):
     if not parsed:
         return False, None, "Cookie sai định dạng", {}, None
     cookies = parsed[0]
-    success, token, error, account = checker.check_cookie(cookies)
+    check_timeout = COOKIE_CHECK_TIMEOUT if timeout is None else max(0.01, float(timeout))
+    future = COOKIE_CHECK_EXECUTOR.submit(checker.check_cookie, cookies)
+    try:
+        success, token, error, account = future.result(timeout=check_timeout)
+    except FutureTimeoutError:
+        future.cancel()
+        app.logger.warning("NFToken check timed out after %ss", check_timeout)
+        return False, None, "network_timeout", {}, None
     netscape = checker.build_netscape_format(cookies) if success and token else None
     return success, token, error, account, netscape
 
@@ -1904,6 +1913,8 @@ def generate_one_nftoken(connection, user_id, mode):
             }
         last_error = error or "Tài khoản đã hết hạn"
         release_cookie(connection, cookie_id, delete=True)
+        if error == "network_timeout":
+            break
         if attempt < 4:
             try:
                 cookie_id, cookie_data = reserve_cookie(connection)

@@ -11,10 +11,15 @@ export class ApiError extends Error {
 
 async function request(path, options = {}) {
   const isForm = options.body instanceof FormData;
+  const timeoutMs = options.timeoutMs || (path === "/api/tools/nftoken" ? 60000 : 30000);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let response;
+  let payload;
   try {
     response = await fetch(path, {
       ...options,
+      signal: options.signal || controller.signal,
       headers: {
         ...(isForm ? {} : {"Content-Type": "application/json"}),
         "X-Telegram-Init-Data": tg?.initData || "",
@@ -22,9 +27,11 @@ async function request(path, options = {}) {
       },
     });
   } catch (_error) {
+    clearTimeout(timeout);
     throw new ApiError("Không thể kết nối máy chủ", 0, {reason_code: "network_error"});
   }
-  const payload = await response.json().catch(() => ({}));
+  payload = await response.json().catch(() => ({}));
+  clearTimeout(timeout);
   if (!response.ok || !payload.ok) {
     throw new ApiError(payload.error || "Không thể kết nối máy chủ", response.status, payload);
   }
