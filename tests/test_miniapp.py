@@ -188,6 +188,18 @@ class MiniAppTest(unittest.TestCase):
         )
         connection.close()
 
+    def test_tv_login_returns_safe_progress_log(self):
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute("INSERT INTO premium_cookies(data) VALUES('NetflixId=tv-cookie')")
+        connection.commit()
+        connection.close()
+        account = {"account_name": "Test", "email_masked": "tes***@mail.com", "plan": "Premium", "membership_status": "CURRENT_MEMBER"}
+        with patch.object(miniapp_server, "run_tv_login", return_value=(True, "Thành công", account)):
+            response = self.client.post("/api/tools/tv-login", json={"code": "12345678"}, headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([step["status"] for step in response.json["steps"]], ["done"] * 5)
+        self.assertNotIn("NetflixId", response.get_data(as_text=True))
+
     def test_giftcode_deposit_and_support_are_direct(self):
         connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
         connection.execute("INSERT INTO discount_codes(code,amount,uses) VALUES('GIFT',5000,1)")
