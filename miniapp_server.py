@@ -1704,10 +1704,14 @@ def cookie_entries_from_upload(filename, payload, max_entries=None):
                     raise ValueError(f"RAR vượt quá {INVENTORY_MAX_FILES} file")
                 if any(item.flag_bits & 1 for item in infos):
                     raise ValueError("RAR có file đặt mật khẩu")
+                if sum(getattr(item, "file_size", 0) for item in infos) > INVENTORY_MAX_UPLOAD_MB * 1024 * 1024:
+                    raise ValueError(f"RAR vượt quá {INVENTORY_MAX_UPLOAD_MB}MB sau giải nén")
                 txt_infos = [item for item in infos if item.filename.lower().endswith('.txt')]
                 if not txt_infos:
                     raise ValueError("RAR không chứa file .txt")
                 for item in txt_infos:
+                    if getattr(item, "file_size", 0) > INVENTORY_MAX_FILE_MB * 1024 * 1024:
+                        raise ValueError(f"File {os.path.basename(item.filename)} vượt quá {INVENTORY_MAX_FILE_MB}MB")
                     raw = archive.read(item).decode('utf-8', errors='ignore')
                     texts.append(raw)
         except rarfile.BadRarFile:
