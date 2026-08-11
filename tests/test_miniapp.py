@@ -394,12 +394,11 @@ class MiniAppTest(unittest.TestCase):
         self.assertEqual(normal.status_code, 503)
         self.assertEqual(self.client.get("/api/bootstrap", headers=self.headers).status_code, 200)
 
-    def test_admin_uploads_zip_filters_txt_and_only_saves_live_cookies(self):
+    def test_admin_uploads_folder_files_filters_txt_and_only_saves_live_cookies(self):
         archive = io.BytesIO()
         with zipfile.ZipFile(archive, "w") as zipped:
-            zipped.writestr("live.txt", "NetflixId=live-cookie")
-            zipped.writestr("dead.txt", "NetflixId=dead-cookie")
-            zipped.writestr("ignored.json", "{}")
+            zipped.writestr("inside-live.txt", "NetflixId=live-cookie")
+            zipped.writestr("inside-dead.txt", "NetflixId=dead-cookie")
         archive.seek(0)
 
         def check_cookie(entry):
@@ -410,20 +409,37 @@ class MiniAppTest(unittest.TestCase):
         with patch.object(miniapp_server, "run_cookie_check", side_effect=check_cookie):
             response = self.client.post(
                 "/api/admin/inventory/premium/upload",
-                data={"file": (archive, "cookies.zip")},
+                data={"files": [
+                    (io.BytesIO(b"NetflixId=folder-live"), "cookies/live.txt"),
+                    (io.BytesIO(b"NetflixId=dead-cookie"), "cookies/dead.txt"),
+                    (archive, "bundles/cookies.zip"),
+                    (io.BytesIO(b"{}"), "cookies/ignored.json"),
+                ]},
                 content_type="multipart/form-data",
                 headers=self.headers,
             )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json["checked"], 2)
-        self.assertEqual(response.json["live"], 1)
-        self.assertEqual(response.json["dead"], 1)
-        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
-        saved = connection.execute("SELECT data FROM premium_cookies").fetchall()
-        self.assertEqual(len(saved), 1)
-        self.assertIn("live-cookie", saved[0][0])
-        connection.close()
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json["files"], 4)
+            self.assertEqual(response.json["skipped"], 1)
+            job_id = response.json["job_id"]
+            for _ in range(200):
+                job = self.client.get(
+                    f"/api/admin/inventory/job/{job_id}", headers=self.headers
+                ).json
+                if job["status"] != "running":
+                    break
+                time.sleep(0.01)
 
+        self.assertEqual(job["status"], "done")
+        self.assertEqual(job["result"]["checked"], 4)
+        self.assertEqual(job["result"]["live"], 2)
+        self.assertEqual(job["result"]["dead"], 2)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        saved = [row[0] for row in connection.execute("SELECT data FROM premium_cookies")]
+        self.assertEqual(len(saved), 2)
+        self.assertTrue(any("live-cookie" in value for value in saved))
+        self.assertTrue(any("folder-live" in value for value in saved))
+        connection.close()
 
 if __name__ == "__main__":
     unittest.main()
