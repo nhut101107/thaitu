@@ -3,7 +3,7 @@ import {state, update} from "./state.js";
 import {emptyState, escapeHtml, formatMoney, icon, modal, productCard, skeleton, toast} from "./components.js?v=10";
 
 function section(title, body, action = "") {
-  return `<section class="content-section"><div class="section-title"><div><small>NFToken Pro</small><h2>${title}</h2></div>${action}</div>${body}</section>`;
+  return `<section class="content-section"><div class="section-title"><div><small>Shop MMO</small><h2>${title}</h2></div>${action}</div>${body}</section>`;
 }
 
 export function homeView() {
@@ -30,7 +30,7 @@ export function homeView() {
 
 export function storeView(loading = false) {
   const categoryButtons = ["", ...state.categories].map((value) => `<button data-category="${escapeHtml(value)}" class="${state.category === value ? "active" : ""}">${escapeHtml(value || "Tất cả")}</button>`).join("");
-  return `<div class="page"><div class="eyebrow">NFTOKEN MARKET</div><div class="store-heading"><h1>Khám phá sản phẩm</h1><span>${state.products.length} SP</span></div>
+  return `<div class="page"><div class="eyebrow">SHOP MMO MARKET</div><div class="store-heading"><h1>Khám phá sản phẩm</h1><span>${state.products.length} SP</span></div>
     <label class="search-box">${icon("search")}<input id="product-search" value="${escapeHtml(state.search)}" placeholder="Tìm gói Cookie, Spotify..."><button data-clear-search>×</button></label>
     <div class="category-row">${categoryButtons}</div>
     <div class="list-heading"><b>Tất cả sản phẩm</b><select id="sort-products"><option value="popular">Phổ biến</option><option value="price_asc" ${state.sort === "price_asc" ? "selected" : ""}>Giá thấp</option><option value="price_desc" ${state.sort === "price_desc" ? "selected" : ""}>Giá cao</option></select></div>
@@ -62,7 +62,7 @@ export function toolsView() {
     ["🛟", "Báo lỗi & hỗ trợ", "Gửi thẳng yêu cầu đến Admin", "support", flags.support],
     ["📚", "Hướng dẫn", "Xem cách sử dụng các chức năng", "help", true],
   ];
-  return `<div class="page"><div class="eyebrow">NFTOKEN TOOLBOX</div><div class="store-heading"><h1>Tiện ích nhanh</h1><span>TRỰC TIẾP</span></div><div class="privacy-banner">${icon("shield")}<div><b>Không rời Mini App</b><small>Mọi tác vụ bên dưới được xác thực và xử lý trực tiếp.</small></div></div><div class="tool-stock"><span>Kho Premium <b>${stock.premium || 0}</b></span><span>Kho Free <b>${stock.free || 0}</b></span></div><div class="tool-grid">${tools.map(([glyph,name,desc,action,enabled]) => `<button data-tool="${action}" ${enabled === false ? "disabled" : ""}><i>${glyph}</i><b>${name}</b><small>${enabled === false ? "Admin đang tạm tắt chức năng" : desc}</small>${enabled === false ? "<em>Tạm tắt</em>" : ""}</button>`).join("")}</div></div>`;
+  return `<div class="page"><div class="eyebrow">SHOP MMO SERVICES</div><div class="store-heading"><h1>Tiện ích nhanh</h1><span>TRỰC TIẾP</span></div><div class="privacy-banner">${icon("shield")}<div><b>Không rời Mini App</b><small>Mọi tác vụ bên dưới được xác thực và xử lý trực tiếp.</small></div></div><div class="tool-stock"><span>Kho Premium <b>${stock.premium || 0}</b></span><span>Kho Free <b>${stock.free || 0}</b></span></div><div class="tool-grid">${tools.map(([glyph,name,desc,action,enabled]) => `<button data-tool="${action}" ${enabled === false ? "disabled" : ""}><i>${glyph}</i><b>${name}</b><small>${enabled === false ? "Admin đang tạm tắt chức năng" : desc}</small>${enabled === false ? "<em>Tạm tắt</em>" : ""}</button>`).join("")}</div></div>`;
 }
 
 export function accountView() {
@@ -223,7 +223,7 @@ export function openReferral() {
 export async function openNotifications() {
   try {
     const result = await api.notifications();
-    modal(`<div class="eyebrow">NFToken Pro</div><h2>Thông báo</h2>${result.items.length ? result.items.map((item) => `<article class="notification-item ${item.is_read ? "read" : "unread"}"><b>${escapeHtml(item.title)}</b><p>${escapeHtml(item.body)}</p><small>${escapeHtml(item.created_at)}</small></article>`).join("") : emptyState("Chưa có thông báo", "Thông báo hệ thống sẽ xuất hiện tại đây.")}<button class="button secondary wide" data-read-all>Đánh dấu đã đọc</button>`, {onOpen(root) { root.querySelector("[data-read-all]")?.addEventListener("click", async () => { await api.markNotificationsRead([], true); toast("Đã đánh dấu đã đọc"); }); }});
+    modal(`<div class="eyebrow">Shop MMO</div><h2>Thông báo</h2>${result.items.length ? result.items.map((item) => `<article class="notification-item ${item.is_read ? "read" : "unread"}"><b>${escapeHtml(item.title)}</b><p>${escapeHtml(item.body)}</p><small>${escapeHtml(item.created_at)}</small></article>`).join("") : emptyState("Chưa có thông báo", "Thông báo hệ thống sẽ xuất hiện tại đây.")}<button class="button secondary wide" data-read-all>Đánh dấu đã đọc</button>`, {onOpen(root) { root.querySelector("[data-read-all]")?.addEventListener("click", async () => { await api.markNotificationsRead([], true); toast("Đã đánh dấu đã đọc"); }); }});
     if (result.unread) { await api.markNotificationsRead([], true); update({notificationUnread: 0}); }
   } catch (error) { toast(error.message, "error"); }
 }
@@ -231,7 +231,7 @@ export async function openNotifications() {
 export async function openMissions() {
   try {
     const result = await api.missions();
-    modal(`<div class="eyebrow">NFToken Pro</div><h2>Nhiệm vụ</h2>${result.items.map((mission) => `<article class="notification-item"><b>${escapeHtml(mission.name)}</b><p>${escapeHtml(mission.description)}</p><small>${mission.claimed ? "Đã nhận" : mission.completed ? "Đủ điều kiện" : "Chưa hoàn thành"}</small>${mission.completed && !mission.claimed ? `<button class="button wide" data-claim-mission="${mission.id}">Nhận ${mission.rewardCredits} lượt NFToken</button>` : ""}</article>`).join("")}`, {onOpen(root, close) { root.querySelectorAll("[data-claim-mission]").forEach((button) => button.onclick = async () => { try { await api.claimMission(button.dataset.claimMission); close(); toast("Đã nhận thưởng nhiệm vụ"); } catch (error) { toast(error.message, "error"); } }); }});
+    modal(`<div class="eyebrow">Shop MMO</div><h2>Nhiệm vụ</h2>${result.items.map((mission) => `<article class="notification-item"><b>${escapeHtml(mission.name)}</b><p>${escapeHtml(mission.description)}</p><small>${mission.claimed ? "Đã nhận" : mission.completed ? "Đủ điều kiện" : "Chưa hoàn thành"}</small>${mission.completed && !mission.claimed ? `<button class="button wide" data-claim-mission="${mission.id}">Nhận ${mission.rewardCredits} lượt NFToken</button>` : ""}</article>`).join("")}`, {onOpen(root, close) { root.querySelectorAll("[data-claim-mission]").forEach((button) => button.onclick = async () => { try { await api.claimMission(button.dataset.claimMission); close(); toast("Đã nhận thưởng nhiệm vụ"); } catch (error) { toast(error.message, "error"); } }); }});
   } catch (error) { toast(error.message, "error"); }
 }
 

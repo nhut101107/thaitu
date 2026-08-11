@@ -63,6 +63,12 @@ class MiniAppTest(unittest.TestCase):
         self.assertEqual(self.client.get("/api/bootstrap").status_code, 401)
         self.assertEqual(self.client.get("/api/bootstrap", headers={"X-Telegram-Init-Data": signed_init_data(1) + "x"}).status_code, 401)
 
+    def test_bootstrap_uses_shop_mmo_customer_brand(self):
+        response = self.client.get("/api/bootstrap", headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["brand"]["name"], "Shop MMO")
+        self.assertEqual(response.json["brand"]["tagline"], "Premium MMO Store")
+
     def test_checkout_is_atomic_and_idempotent(self):
         response = self.client.put("/api/cart/1", json={"quantity": 2}, headers=self.headers)
         self.assertEqual(response.status_code, 200)

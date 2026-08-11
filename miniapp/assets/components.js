@@ -25,7 +25,7 @@ export function icon(name) {
 export function header(user) {
   const initials = escapeHtml((user.firstName || "N")[0].toUpperCase());
   const avatar = user.photoUrl ? `<img src="${escapeHtml(user.photoUrl)}" alt="">` : initials;
-  return `<div class="topbar"><div class="logo"><span class="brand-mark small">N</span><div><b>NFToken</b><small>PREMIUM STORE</small></div></div><div class="header-actions"><button data-action="search" aria-label="Tìm kiếm">${icon("search")}</button><button data-action="notifications" aria-label="Thông báo">${icon("account")}${state.notificationUnread ? `<em class="notification-badge">${Math.min(99, state.notificationUnread)}</em>` : ""}</button><button data-action="install" aria-label="Cài ứng dụng">＋</button><button class="avatar" data-route="account">${avatar}</button></div></div>`;
+  return `<div class="topbar"><div class="logo"><span class="brand-mark small">S</span><div><b>Shop MMO</b><small>PREMIUM STORE</small></div></div><div class="header-actions"><button data-action="search" aria-label="Tìm kiếm">${icon("search")}</button><button data-action="notifications" aria-label="Thông báo">${icon("account")}${state.notificationUnread ? `<em class="notification-badge">${Math.min(99, state.notificationUnread)}</em>` : ""}</button><button data-action="install" aria-label="Cài ứng dụng">＋</button><button class="avatar" data-route="account">${avatar}</button></div></div>`;
 }
 
 export function bottomNav(route) {
@@ -42,7 +42,7 @@ export function productCard(item) {
 }
 
 export function emptyState(title, text, action = "") {
-  return `<div class="empty-state"><span class="brand-mark">N</span><h3>${escapeHtml(title)}</h3><p>${escapeHtml(text)}</p>${action}</div>`;
+  return `<div class="empty-state"><span class="brand-mark">S</span><h3>${escapeHtml(title)}</h3><p>${escapeHtml(text)}</p>${action}</div>`;
 }
 
 export function skeleton(count = 4) {

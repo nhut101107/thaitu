@@ -1,7 +1,7 @@
 {
-  "name": "NFToken Pro",
-  "short_name": "NFToken",
-  "description": "NFToken Pro premium store",
+  "name": "Shop MMO",
+  "short_name": "Shop MMO",
+  "description": "Shop MMO premium store",
   "start_url": "/?source=pwa",
   "display": "standalone",
   "background_color": "#070707",

@@ -1,4 +1,4 @@
-const CACHE_VERSION = "nftoken-static-v1";
+const CACHE_VERSION = "shop-mmo-static-v2";
 const STATIC_ASSETS = ["/", "/assets/styles.css", "/assets/modern.css?v=1", "/assets/theme.css?v=1"];
 
 self.addEventListener("install", (event) => {

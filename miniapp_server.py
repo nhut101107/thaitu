@@ -1385,7 +1385,7 @@ def service_worker():
 def health():
     return jsonify({
         "ok": True,
-        "service": "NFToken Pro Mini App",
+        "service": "Shop MMO Mini App",
         "runtime_version": TV_LOGIN_RUNTIME_VERSION,
         "source_fingerprint": SOURCE_FINGERPRINT,
     })
@@ -1421,7 +1421,7 @@ def bootstrap():
     return jsonify(
         {
             "ok": True,
-            "brand": {"name": "NFToken Pro", "tagline": "Premium Cookie Store"},
+            "brand": {"name": "Shop MMO", "tagline": "Premium MMO Store"},
             "brandAsset": (f"/uploads/brand/{brand_row['filename']}?v={brand_row['version']}" if brand_row and brand_row["filename"] else ""),
             "user": {
                 "id": user_id,
