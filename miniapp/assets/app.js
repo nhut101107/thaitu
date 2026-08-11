@@ -1,8 +1,8 @@
-import {api} from "./api.js?v=10";
+import {api} from "./api.js?v=11";
 import {state, subscribe, update} from "./state.js";
 import {bottomNav, header, toast} from "./components.js";
-import {accountView, addToCart, claimFreeCookie, homeView, openCart, openDeposit, openGiftcode, openHelp, openNftoken, openOrder, openProduct, openSupport, openTvLogin, ordersView, storeView, toolsView} from "./views.js?v=10";
-import {adminView, bindAdminEvents, loadAdmin} from "./admin.js?v=10";
+import {accountView, addToCart, claimFreeCookie, homeView, openCart, openCheckin, openDeposit, openGiftcode, openHelp, openNftoken, openOrder, openProduct, openReferral, openSupport, openTvLogin, ordersView, storeView, toolsView} from "./views.js?v=11";
+import {adminView, bindAdminEvents, loadAdmin} from "./admin.js?v=11";
 
 const tg = window.Telegram?.WebApp;
 const app = document.querySelector("#app");
@@ -22,7 +22,8 @@ function render() {
   document.querySelector("#header").innerHTML = header(state.bootstrap.user);
   document.querySelector("#bottom-nav").innerHTML = bottomNav(state.route);
   const view = ({home: homeView, store: storeView, orders: ordersView, tools: toolsView, account: accountView, admin: adminView}[state.route] || homeView)();
-  content.innerHTML = `${view}<footer class="site-copyright">${state.bootstrap.copyright || "© 2026 mnhut. All rights reserved."}</footer>`;
+  const copyright = typeof state.bootstrap.copyright === "string" ? state.bootstrap.copyright : (state.bootstrap.copyright?.text || "© mnhut - NFToken Pro");
+  content.innerHTML = `${view}<footer class="site-copyright">${copyright}</footer>`;
   bindEvents();
 }
 
@@ -57,7 +58,7 @@ function bindEvents() {
   document.querySelectorAll("[data-product]").forEach((node) => node.onclick = (event) => { if (!event.target.closest("[data-add]")) openProduct(node.dataset.product); });
   document.querySelectorAll("[data-add]").forEach((node) => node.onclick = (event) => { event.stopPropagation(); addToCart(node.dataset.add); });
   document.querySelectorAll("[data-order]").forEach((node) => node.onclick = () => openOrder(node.dataset.order));
-  const toolActions = {tv: openTvLogin, "plan-token": () => openNftoken("plan"), "vip-token": () => openNftoken("vip"), "free-cookie": claimFreeCookie, giftcode: openGiftcode, deposit: openDeposit, support: openSupport, help: openHelp};
+  const toolActions = {tv: openTvLogin, "plan-token": () => openNftoken("plan"), "vip-token": () => openNftoken("vip"), "free-cookie": claimFreeCookie, checkin: openCheckin, referral: openReferral, giftcode: openGiftcode, deposit: openDeposit, support: openSupport, help: openHelp};
   document.querySelectorAll("[data-tool]").forEach((node) => node.onclick = () => toolActions[node.dataset.tool]?.());
   document.querySelectorAll("[data-action='cart']").forEach((node) => node.onclick = openCart);
   document.querySelectorAll("[data-action='deposit']").forEach((node) => node.onclick = openDeposit);

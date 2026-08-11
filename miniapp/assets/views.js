@@ -54,6 +54,8 @@ export function toolsView() {
     ["⚡", "Tạo link NFToken", `${quota.nftokenCredits || 0} lượt đã mua · ${Math.max(0,(quota.tokensMax || 0)-(quota.tokensUsed || 0))} lượt gói/ngày`, "plan-token", flags.planToken],
     ["🍪", "Rút Cookie VIP", `${quota.credits || 0} lượt đã mua`, "vip-token", flags.vipToken],
     ["🎁", "Cookie miễn phí", `${quota.freeCookiesUsed || 0}/${quota.freeCookiesMax || 0} lượt hôm nay`, "free-cookie", flags.freeCookie],
+    ["✅", "Điểm danh Cookie Free", `${state.bootstrap.checkin?.remaining || 0}/${state.bootstrap.checkin?.daily || 2} lượt còn lại hôm nay`, "checkin", true],
+    ["🔗", "Giới thiệu bạn bè", `${state.bootstrap.referral?.count || 0}/5 người hợp lệ · nhận 2 lượt NFToken`, "referral", true],
     ["🎟", "Nhập mã quà tặng", "Cộng số dư trực tiếp", "giftcode", flags.giftcode],
     ["💸", "Nạp tiền", "Tạo QR và yêu cầu duyệt", "deposit", flags.deposit],
     ["🛟", "Báo lỗi & hỗ trợ", "Gửi thẳng yêu cầu đến Admin", "support", flags.support],
@@ -99,7 +101,7 @@ export function openCart() {
 function confirmCheckout(closeCart) {
   modal(`<div class="confirm-icon">${icon("shield")}</div><h2>Xác nhận thanh toán?</h2><p>Backend sẽ kiểm tra lại giá, sản phẩm và số dư trước khi tạo đơn.</p><div class="cart-total"><span>Tổng cộng</span><b>${formatMoney(state.cart.total)}</b></div><button class="button wide" data-confirm-checkout>Mua ngay</button>`, {onOpen(root, close) { root.querySelector("[data-confirm-checkout]").onclick = async (event) => {
     if (state.busy) return; state.busy = true; event.currentTarget.disabled = true;
-    try { const key = crypto.randomUUID().replaceAll("-", ""); const result = await api.checkout(key); update({cart:{items:[],count:0,total:0}}); close(); closeCart(); toast(`Thanh toán thành công ${formatMoney(result.total)}`); }
+    try { const key = crypto.randomUUID().replaceAll("-", ""); const promoCode = window.prompt("Mã giảm giá (bỏ trống nếu không có)", "") || ""; const result = await api.checkout(key, promoCode); update({cart:{items:[],count:0,total:0}}); close(); closeCart(); toast(`Thanh toán thành công ${formatMoney(result.total)}`); }
     catch (error) { toast(error.message, "error"); event.currentTarget.disabled = false; }
     finally { state.busy = false; }
   }; }});
@@ -157,7 +159,7 @@ export function claimFreeCookie() {
   modal(`<div class="confirm-icon">🎁</div><h2>Cookie miễn phí</h2><p>Cookie được lấy theo đúng hạn mức gói của bạn.</p><button class="button wide" data-claim-free>Nhận Cookie ngay</button>`, {onOpen(root, close) {
     root.querySelector("[data-claim-free]").onclick = async (event) => {
       const done = busyButton(event.currentTarget);
-      try { const result = await api.freeCookie(); syncQuota(result.quota); close(); modal(`<div class="confirm-icon">✓</div><h2>Cookie của bạn</h2><textarea class="result-text" readonly>${escapeHtml(result.cookie)}</textarea><button class="button wide" data-copy-cookie>Sao chép Cookie</button>`, {onOpen(resultRoot) { resultRoot.querySelector("[data-copy-cookie]").onclick = () => navigator.clipboard.writeText(result.cookie).then(() => toast("Đã sao chép Cookie")); }}); }
+      try { const result = await api.freeCookie(); syncQuota(result.quota); close(); modal(`<div class="confirm-icon">✓</div><h2>Cookie của bạn</h2><p class="privacy-banner">${escapeHtml(result.copyright?.text || "© mnhut - NFToken Pro")}</p><textarea class="result-text" readonly>${escapeHtml(result.cookie)}</textarea><button class="button wide" data-copy-cookie>Sao chép Cookie</button>`, {onOpen(resultRoot) { resultRoot.querySelector("[data-copy-cookie]").onclick = () => navigator.clipboard.writeText(result.cookie).then(() => toast("Đã sao chép Cookie")); }}); }
       catch (error) { toast(error.message, "error"); done(); }
     };
   }});
@@ -203,6 +205,17 @@ export function openTvLogin() {
       }
     };
   }});
+}
+
+export function openCheckin() {
+  modal(`<div class="confirm-icon">✅</div><h2>Điểm danh Cookie Free</h2><p>Mỗi ngày bạn nhận 2 lượt theo múi giờ Việt Nam. Chỉ trừ lượt sau khi lấy Cookie thành công.</p><button class="button wide" data-checkin>Điểm danh hôm nay</button>`, {onOpen(root, close) {
+    root.querySelector("[data-checkin]").onclick = async (event) => { const done = busyButton(event.currentTarget); try { const result = await api.checkin(); state.bootstrap.checkin = result.checkin; close(); toast(result.new ? "Đã nhận 2 lượt Cookie hôm nay" : "Bạn đã điểm danh hôm nay"); update({bootstrap: state.bootstrap}); } catch (error) { toast(error.message, "error"); done(); } };
+  }});
+}
+
+export function openReferral() {
+  const referral = state.bootstrap.referral || {};
+  modal(`<div class="confirm-icon">🔗</div><h2>Giới thiệu bạn bè</h2><p>Đã có ${referral.count || 0}/5 người hợp lệ. Đủ 5 người sẽ nhận đúng 2 lượt NFToken.</p><label class="field">Link giới thiệu<input readonly value="${escapeHtml(referral.link || "")}"></label><button class="button wide" data-copy-referral>Sao chép link</button>`, {onOpen(root) { root.querySelector("[data-copy-referral]").onclick = () => navigator.clipboard.writeText(referral.link || "").then(() => toast("Đã sao chép link")); }});
 }
 
 export function openGiftcode() {

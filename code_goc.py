@@ -996,7 +996,11 @@ class NetflixTokenChecker:
         return '; '.join([f"{k}={v}" for k, v in cookie_dict.items()])
 
     def build_netscape_format(self, cookie_dict: Dict[str, str]) -> str:
+        enabled = os.getenv("COPYRIGHT_WATERMARK_ENABLED", "1").strip().lower() not in {"0", "false", "no"}
+        text = os.getenv("COPYRIGHT_WATERMARK_TEXT", "© mnhut - NFToken Pro\nBản quyền nội dung xuất bởi hệ thống NFToken Pro")
         netscape = ["# Netscape HTTP Cookie File"]
+        if enabled:
+            netscape.extend(f"# {line}" for line in text.splitlines() if line.strip())
         domain = ".netflix.com"
         path = "/"
         secure = "TRUE"
