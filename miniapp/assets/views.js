@@ -151,12 +151,44 @@ export function claimFreeCookie() {
   }});
 }
 
+function tvLogMarkup(items = []) {
+  const fallback = [
+    {label: "Kiểm tra mã TV", status: "pending"},
+    {label: "Chuẩn bị Cookie Premium live", status: "pending"},
+    {label: "Mở phiên Netflix bảo mật", status: "pending"},
+    {label: "Gửi mã kết nối tới TV", status: "pending"},
+    {label: "Xác nhận kết nối", status: "pending"},
+  ];
+  const rows = items.length ? items : fallback;
+  const symbol = {done: "✓", active: "•", error: "!", pending: ""};
+  return `<div class="tv-log" data-tv-log>${rows.map((item) => `<div class="tv-log-row ${escapeHtml(item.status || "pending")}" data-tv-step="${escapeHtml(item.key || "")}"><i>${symbol[item.status] || ""}</i><span>${escapeHtml(item.label)}</span><small>${item.status === "done" ? "Hoàn tất" : item.status === "error" ? "Cần kiểm tra" : item.status === "active" ? "Đang xử lý" : "Chờ xử lý"}</small></div>`).join("")}</div>`;
+}
+
 export function openTvLogin() {
-  modal(`<div class="confirm-icon">📺</div><h2>Đăng nhập Netflix TV</h2><p>Mở Netflix trên TV, chọn đăng nhập từ trang web rồi nhập mã đang hiển thị.</p><label class="field">Mã TV<input id="tv-code" inputmode="text" maxlength="12" placeholder="Ví dụ: 12345678"></label><button class="button wide" data-run-tv>Kết nối TV</button>`, {onOpen(root, close) {
-    root.querySelector("[data-run-tv]").onclick = async (event) => {
-      const code = root.querySelector("#tv-code").value.trim(); const done = busyButton(event.currentTarget, "Đang kết nối, vui lòng chờ...");
-      try { const result = await api.tvLogin(code); close(); modal(`<div class="confirm-icon">✓</div><h2>${escapeHtml(result.message)}</h2>${accountSummary(result.account)}`); }
-      catch (error) { toast(error.message, "error"); done(); }
+  modal(`<div class="tv-hero"><span>📺</span><div><div class="eyebrow">NETFLIX TV CONNECT</div><h2>Đăng nhập TV an toàn</h2></div></div><p class="modal-lead">Mở Netflix trên TV → chọn <b>Đăng nhập từ trang web</b> → nhập mã đang hiển thị.</p><label class="field">Mã TV<input id="tv-code" inputmode="text" maxlength="12" autocomplete="one-time-code" placeholder="Ví dụ: 1234 5678"></label>${tvLogMarkup()}<p class="tv-note">Cookie được giữ lại nếu kết nối thất bại; hệ thống không hiển thị Cookie ra ngoài.</p><button class="button wide" data-run-tv>Kiểm tra & kết nối</button>`, {onOpen(root) {
+    const button = root.querySelector("[data-run-tv]");
+    const input = root.querySelector("#tv-code");
+    const renderLog = (items) => { const log = root.querySelector("[data-tv-log]"); if (log) log.outerHTML = tvLogMarkup(items); };
+    button.onclick = async (event) => {
+      const code = input.value.trim();
+      if (!code) { input.focus(); toast("Hãy nhập mã TV", "error"); return; }
+      const done = busyButton(event.currentTarget, "Đang kết nối..."); input.disabled = true;
+      let stage = 0;
+      const timer = setInterval(() => {
+        stage = Math.min(stage + 1, 3);
+        renderLog(["validate", "cookie", "browser", "connect", "done"].map((key, index) => ({key, label: ["Kiểm tra mã TV", "Chuẩn bị Cookie Premium live", "Mở phiên Netflix bảo mật", "Gửi mã kết nối tới TV", "Xác nhận kết nối"][index], status: index < stage ? "done" : index === stage ? "active" : "pending"})));
+      }, 1200);
+      try {
+        const result = await api.tvLogin(code);
+        clearInterval(timer); renderLog(result.steps || []);
+        setTimeout(() => { const close = modal(`<div class="confirm-icon">✓</div><div class="eyebrow">TV CONNECTED</div><h2>${escapeHtml(result.message)}</h2><p class="modal-lead">Thiết bị đã được liên kết thành công.</p>${accountSummary(result.account)}<button class="button wide" data-close-result>Hoàn tất</button>`); document.querySelector("[data-close-result]")?.addEventListener("click", close); }, 280);
+      } catch (error) {
+        clearInterval(timer); renderLog(error.payload?.steps || [{key: "connect", label: "Kết nối Netflix TV", status: "error"}]);
+        const sheet = root.querySelector(".modal-sheet");
+        sheet.querySelector("[data-tv-error]")?.remove();
+        sheet.insertAdjacentHTML("beforeend", `<div class="tv-error" data-tv-error>⚠️ ${escapeHtml(error.message)}</div>`);
+        input.disabled = false; done();
+      }
     };
   }});
 }
