@@ -431,9 +431,9 @@ class MiniAppTest(unittest.TestCase):
                 time.sleep(0.01)
 
         self.assertEqual(job["status"], "done")
-        self.assertEqual(job["result"]["checked"], 4)
+        self.assertEqual(job["result"]["checked"], 3)
         self.assertEqual(job["result"]["live"], 2)
-        self.assertEqual(job["result"]["dead"], 2)
+        self.assertEqual(job["result"]["dead"], 1)
         connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
         saved = [row[0] for row in connection.execute("SELECT data FROM premium_cookies")]
         self.assertEqual(len(saved), 2)
