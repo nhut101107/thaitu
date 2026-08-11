@@ -402,7 +402,7 @@ class MiniAppTest(unittest.TestCase):
         archive.seek(0)
 
         def check_cookie(entry):
-            if "live-cookie" in entry:
+            if "live-cookie" in entry or "folder-live" in entry:
                 return True, "token", None, {"membership_status": "CURRENT_MEMBER"}, "netscape"
             return False, None, "dead", {}, None
 
