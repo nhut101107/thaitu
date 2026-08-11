@@ -38,7 +38,10 @@ async function request(path, options = {}) {
     clearTimeout(timeout);
   }
   if (!response.ok || !payload.ok) {
-    throw new ApiError(payload.error || "Không thể kết nối máy chủ", response.status, payload);
+    const fallback = response.status >= 500
+      ? `Máy chủ trả về lỗi HTTP ${response.status}`
+      : "Yêu cầu máy chủ không hợp lệ";
+    throw new ApiError(payload.error || fallback, response.status, payload);
   }
   return payload;
 }

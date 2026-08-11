@@ -1,6 +1,6 @@
-import {api} from "./api.js";
+import {api} from "./api.js?v=12";
 import {state, update} from "./state.js";
-import {emptyState, escapeHtml, formatMoney, icon, modal, productCard, skeleton, toast} from "./components.js?v=10";
+import {emptyState, escapeHtml, formatMoney, icon, modal, productCard, skeleton, toast} from "./components.js?v=12";
 
 function section(title, body, action = "") {
   return `<section class="content-section"><div class="section-title"><div><small>Shop MMO</small><h2>${title}</h2></div>${action}</div>${body}</section>`;
@@ -150,16 +150,19 @@ export function openNftoken(mode = "plan") {
   modal(`<div class="confirm-icon">${vip ? "🍪" : "⚡"}</div><h2>${vip ? "Rút Cookie VIP" : "Tạo NFToken theo gói"}</h2><p>${vip ? "Lượt đã mua sẽ chỉ bị trừ khi tạo thành công." : "Sử dụng hạn mức NFToken hằng ngày của gói hiện tại."}</p>${vip ? '<label class="field">Số lượng<input id="tool-quantity" type="number" min="1" max="5" value="1"></label>' : ""}<button class="button wide" data-run-nftoken>Bắt đầu xử lý</button>`, {onOpen(root, close) {
     root.querySelector("[data-run-nftoken]").onclick = async (event) => {
       const done = busyButton(event.currentTarget); const quantity = Number(root.querySelector("#tool-quantity")?.value || 1);
+      let failed = false;
       try {
         const result = await api.nftoken(mode, quantity, requestId); syncQuota(result.quota); close();
         modal(`<div class="confirm-icon">✓</div><h2>Tạo thành công ${result.items.length} NFToken</h2>${result.items.map((item, index) => `<article class="token-result"><b>Tài khoản ${index + 1}</b>${accountSummary(item.account)}<a class="button wide" href="${escapeHtml(item.link)}" target="_blank" rel="noopener">Mở Netflix</a>${item.downloadUrl ? `<a class="button secondary wide" href="${escapeHtml(item.downloadUrl)}">Tải file NFToken bảo mật</a>` : ""}<button class="button secondary wide" data-copy-link="${escapeHtml(item.link)}">Sao chép link</button></article>`).join("")}`, {onOpen(resultRoot) { resultRoot.querySelectorAll("[data-copy-link]").forEach((button) => button.onclick = () => navigator.clipboard.writeText(button.dataset.copyLink).then(() => toast("Đã sao chép link"))); }});
       } catch (error) {
-        done();
+        failed = true;
         const message = error.reasonCode === "nftoken_timeout"
           ? "Máy chủ xử lý quá lâu, vui lòng thử lại"
           : error.message;
         toast(message, "error");
-        event.currentTarget.textContent = "Thử lại";
+      } finally {
+        done();
+        if (failed && event.currentTarget.isConnected) event.currentTarget.textContent = "Thử lại";
       }
     };
   }});

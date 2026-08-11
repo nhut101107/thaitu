@@ -93,6 +93,8 @@ class MiniAppTest(unittest.TestCase):
         self.assertIn("nftokenJob", api_source)
         self.assertIn("requestId", views_source)
         self.assertIn("Thử lại", views_source)
+        self.assertIn("finally", views_source)
+        self.assertIn('api.js?v=12', Path("miniapp/assets/app.js").read_text(encoding="utf-8"))
 
     def test_checkout_is_atomic_and_idempotent(self):
         response = self.client.put("/api/cart/1", json={"quantity": 2}, headers=self.headers)
