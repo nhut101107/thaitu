@@ -980,7 +980,7 @@ def free_cookie():
     except ToolError as error:
         return jsonify({"ok": False, "error": str(error)}), error.status
     if tool_rate_limited(user_id):
-        return jsonify({"ok": False, "error": "Bạn thao tác quá nhanh"}), 429
+        return jsonify({"ok": False, "error": "Bạn thao tác quá nhanh", "steps": [{"key": "validate", "label": "Kiểm tra mã TV", "status": "error"}]}), 429
     today = datetime.now().strftime("%Y-%m-%d")
     try:
         connection.execute("BEGIN IMMEDIATE")
@@ -1116,7 +1116,7 @@ def tv_login():
     try:
         require_feature(connection, "tv")
     except ToolError as error:
-        return jsonify({"ok": False, "error": str(error)}), error.status
+        return jsonify({"ok": False, "error": str(error), "steps": steps("validate", True)}), error.status
     cookie_id = None
     try:
         cookie_id, cookie_data = reserve_cookie(connection)
