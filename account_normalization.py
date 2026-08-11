@@ -24,6 +24,18 @@ PAYMENT_LABELS = {
     "ITUNES": "iTunes",
     "GOOGLEPLAY": "Google Play",
     "GOOGLE_PAY": "Google Pay",
+    "AMEX": "American Express",
+}
+CARD_LABELS = {
+    "VISA": "Visa",
+    "MASTERCARD": "Mastercard",
+    "MAESTRO": "Maestro",
+    "AMEX": "American Express",
+    "AMERICAN_EXPRESS": "American Express",
+    "DISCOVER": "Discover",
+    "JCB": "JCB",
+    "UNIONPAY": "UnionPay",
+    "DINERS_CLUB": "Diners Club",
 }
 NON_CARD_PAYMENT_KEYS = {
     "DC", "DCB", "DIRECT_CARRIER_BILLING", "DIRECT CARRIER", "PAYPAL",
@@ -167,6 +179,32 @@ def normalize_membership_status(value: Any) -> str:
     return STATUS_LABELS.get(key, raw)
 
 
+def normalize_card_type(value: Any) -> str:
+    raw = decode_escaped_text(value)
+    if not raw or raw.casefold() in UNKNOWN_VALUES:
+        return ""
+    key = re.sub(r"[\s-]+", "_", raw.upper()).strip("_")
+    if key in {"DC", "DCB", "DIRECT_CARRIER", "DIRECT_CARRIER_BILLING"}:
+        return "Thanh toán nhà mạng (DCB)"
+    if key in CARD_LABELS:
+        return CARD_LABELS[key]
+    compact = key.replace("_", "")
+    if compact in CARD_LABELS:
+        return CARD_LABELS[compact]
+    return raw if len(raw) > 2 else ""
+
+
+def normalize_stream_limit(plan: Any, current: Any = "") -> str:
+    plan_key = _fold_text(plan)
+    if any(value in plan_key for value in ("premium", "cao cap", "uhd")):
+        return "4"
+    if any(value in plan_key for value in ("standard", "tieu chuan")):
+        return "2"
+    if any(value in plan_key for value in ("basic", "co ban", "mobile")):
+        return ""
+    return decode_escaped_text(current)
+
+
 def _name_candidates(account: dict) -> list[str]:
     candidates = []
     for key in NAME_FIELDS:
@@ -242,15 +280,27 @@ def normalize_account_payload(account: dict) -> dict:
     payment_raw = normalized.get("payment_method") or normalized.get("paymentType") or normalized.get("paymentMethod")
     card_raw = normalized.get("cc_type") or normalized.get("cardType") or normalized.get("cardBrand")
     payment = normalize_payment_method(payment_raw)
-    card = normalize_payment_method(card_raw)
-    if payment == "Không rõ" and card == "Thanh toán nhà mạng (DCB)":
+    card = normalize_card_type(card_raw)
+    if payment == "Không rõ" and card:
         payment = card
-    if payment == "Thanh toán nhà mạng (DCB)" and card in {"Không rõ", "Thanh toán nhà mạng (DCB)"}:
+    if payment == "Thanh toán nhà mạng (DCB)" and card in {"", "Không rõ", "Thanh toán nhà mạng (DCB)"}:
         card = payment
+    if payment == "Thẻ tín dụng":
+        # A generic CC code is not useful to the customer. Use the real brand
+        # when Netflix returned it; otherwise omit the payment field entirely.
+        payment = card if card and card != "Thanh toán nhà mạng (DCB)" else ""
+        card = card if payment else ""
+    if payment in {"PayPal", "Gift Card", "iTunes", "Google Play", "Google Pay"}:
+        card = ""
+    if payment == "Không rõ":
+        payment = ""
     normalized["payment_method"] = payment
     normalized["cc_type"] = card
     normalized["membership_status_label"] = normalize_membership_status(
         normalized.get("membership_status")
+    )
+    normalized["max_streams"] = normalize_stream_limit(
+        normalized.get("plan"), normalized.get("max_streams")
     )
     normalized["last4"] = decode_escaped_text(normalized.get("last4")) or "N/A"
     if payment in {"Thanh toán nhà mạng (DCB)", "PayPal", "Gift Card", "iTunes", "Google Play", "Google Pay"}:

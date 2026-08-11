@@ -1070,6 +1070,12 @@ def public_account(account):
             return ", ".join(str(item) for item in raw) if isinstance(raw, list) else str(raw)
         return repair_mojibake(str(raw))
 
+    def is_available(item):
+        return str(item or "").strip().casefold() not in {
+            "", "n/a", "na", "none", "null", "unknown", "xx",
+            "không rõ", "netflix không cung cấp", "không có profile",
+        }
+
     profiles = account.get("profiles") or []
     details = [
         ("Tên tài khoản", value("account_name")),
@@ -1093,15 +1099,27 @@ def public_account(account):
         ("Số profile", value("profile_count", str(len(profiles)))),
         ("Profiles", ", ".join(str(item) for item in profiles) if profiles else "Không có profile"),
     ]
+    details = [
+        {"label": label, "value": item}
+        for label, item in details
+        if is_available(item)
+    ]
+    name = value("account_name")
+    email = value("email_masked")
+    plan = value("plan")
+    country = value("country")
+    status = normalize_membership_status(account.get("membership_status"))
+    quality = value("video_quality")
+    profile_value = value("profile_count", str(len(profiles)))
     return {
-        "name": value("account_name"),
-        "email": value("email_masked"),
-        "plan": value("plan"),
-        "country": value("country"),
-        "status": normalize_membership_status(account.get("membership_status")),
-        "quality": value("video_quality"),
-        "profiles": value("profile_count", str(len(profiles))),
-        "details": [{"label": label, "value": item} for label, item in details],
+        "name": name if is_available(name) else "",
+        "email": email if is_available(email) else "",
+        "plan": plan if is_available(plan) else "",
+        "country": country if is_available(country) else "",
+        "status": status if is_available(status) else "",
+        "quality": quality if is_available(quality) else "",
+        "profiles": profile_value if is_available(profile_value) else "",
+        "details": details,
     }
 
 

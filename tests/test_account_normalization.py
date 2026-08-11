@@ -3,7 +3,11 @@ from pathlib import Path
 import unittest
 
 import code_goc
-from account_normalization import normalize_account_payload, normalize_payment_method, normalize_profiles
+from account_normalization import (
+    normalize_account_payload,
+    normalize_payment_method,
+    normalize_profiles,
+)
 from miniapp_server import public_account
 
 
@@ -25,6 +29,39 @@ class AccountNormalizationTest(unittest.TestCase):
         self.assertEqual(account["payment_method"], "Thanh toán nhà mạng (DCB)")
         self.assertEqual(account["cc_type"], "Thanh toán nhà mạng (DCB)")
         self.assertEqual(account["last4"], "Không có")
+
+    def test_card_payment_uses_real_brand_and_hides_generic_or_missing_values(self):
+        visa = normalize_account_payload({"payment_method": "CC", "cc_type": "VISA"})
+        self.assertEqual(visa["payment_method"], "Visa")
+        self.assertEqual(visa["cc_type"], "Visa")
+        missing = normalize_account_payload({"payment_method": "CC", "cc_type": "N/A"})
+        self.assertEqual(missing["payment_method"], "")
+        self.assertEqual(missing["cc_type"], "")
+
+    def test_stream_limits_follow_plan_and_basic_is_omitted(self):
+        self.assertEqual(normalize_account_payload({"plan": "UHD", "max_streams": "1"})["max_streams"], "4")
+        self.assertEqual(normalize_account_payload({"plan": "Standard", "max_streams": "1"})["max_streams"], "2")
+        self.assertEqual(normalize_account_payload({"plan": "Basic", "max_streams": "1"})["max_streams"], "")
+
+    def test_unavailable_fields_are_omitted_from_public_and_bot_cards(self):
+        account = normalize_account_payload({
+            "account_name": "Azril Joy Nalo",
+            "payment_method": "CC",
+            "cc_type": "N/A",
+            "membership_status": "N/A",
+            "plan": "N/A",
+        })
+        public = public_account(account)
+        values = [item["value"] for item in public["details"]]
+        self.assertNotIn("Không rõ", values)
+        self.assertNotIn("Netflix không cung cấp", values)
+        from code_goc import format_account_card
+        card = format_account_card(account, "https://example.invalid")
+        self.assertNotIn("Phương thức TT", card)
+        self.assertNotIn("Netflix không cung cấp", card)
+
+        visa = normalize_account_payload({"payment_method": "CC", "cc_type": "VISA"})
+        self.assertIn("Visa", format_account_card(visa, "https://example.invalid"))
 
     def test_account_name_rejects_country_alias_even_when_country_code_differs(self):
         account = normalize_account_payload({"account_name": "Việt Nam", "country": "MY"})

@@ -810,7 +810,7 @@ def format_account_card(account: dict, link: str, index: int = 0) -> str:
         price_display = plan_price if has_currency else (f"{currency} {plan_price}" if currency else plan_price)
     else: price_display = 'Netflix không cung cấp'
 
-    return (
+    card = (
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"THÔNG TIN TÀI KHOẢN\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -840,6 +840,21 @@ def format_account_card(account: dict, link: str, index: int = 0) -> str:
         f"🔗 **Link Đăng Nhập:**\n`{link}`\n\n"
         f"Nếu có lỗi xảy ra, hãy bấm nút Báo lỗi bên dưới:"
     )
+
+    hidden_markers = {
+        "", "n/a", "na", "none", "null", "unknown", "xx",
+        "không rõ", "netflix không cung cấp", "không có profile",
+        "chưa thiết lập",
+    }
+    visible_lines = []
+    for line in card.splitlines():
+        lowered = line.casefold()
+        if any(marker in lowered for marker in hidden_markers if marker):
+            continue
+        if line.rstrip().endswith(":"):
+            continue
+        visible_lines.append(line)
+    return "\n".join(visible_lines)
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 for _quiet_logger in ('httpx', 'httpcore', 'telegram.request'):
