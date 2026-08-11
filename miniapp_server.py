@@ -7,6 +7,7 @@ import os
 import sqlite3
 import threading
 import time
+import uuid
 import zipfile
 import rarfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -30,6 +31,68 @@ TOOL_ATTEMPTS = {}
 TOOL_LOCK = threading.Lock()
 MIGRATION_LOCK = threading.Lock()
 MIGRATED_PATHS = set()
+
+# ── Background Upload Job System ──
+UPLOAD_JOBS = {}  # job_id -> {status, progress, result, ...}
+UPLOAD_JOBS_LOCK = threading.Lock()
+
+def _bg_upload_worker(job_id, table, entries):
+    """Run cookie live-checks in background thread, update UPLOAD_JOBS."""
+    try:
+        total = len(entries)
+        live_entries = []
+        dead = 0
+        checked = 0
+        max_w = min(12, total)
+        with ThreadPoolExecutor(max_workers=max_w) as executor:
+            futures = {executor.submit(run_cookie_check, e): e for e in entries}
+            for future in as_completed(futures):
+                try:
+                    success, token, _err, account, _ns = future.result()
+                    if success and token and account.get("membership_status") == "CURRENT_MEMBER":
+                        live_entries.append(futures[future])
+                    else:
+                        dead += 1
+                except Exception:
+                    dead += 1
+                checked += 1
+                with UPLOAD_JOBS_LOCK:
+                    UPLOAD_JOBS[job_id]["progress"] = {
+                        "checked": checked, "total": total,
+                        "live": len(live_entries), "dead": dead,
+                        "percent": round(checked / total * 100),
+                    }
+
+        conn = sqlite3.connect(DATABASE_PATH, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        added = 0
+        duplicates = 0
+        for entry in live_entries:
+            if conn.execute(f"SELECT 1 FROM {table} WHERE data=? LIMIT 1", (entry,)).fetchone():
+                duplicates += 1
+                continue
+            conn.execute(f"INSERT INTO {table}(data,is_used) VALUES(?,0)", (entry,))
+            added += 1
+        conn.execute(
+            "INSERT INTO miniapp_admin_audit(ts,action,target,detail) VALUES(?,?,?,?)",
+            (datetime.utcnow().isoformat(), "inventory.upload", table.replace("_cookies", ""),
+             f"checked={total},live={len(live_entries)},added={added},dead={dead},duplicates={duplicates}"),
+        )
+        conn.commit()
+        conn.close()
+
+        with UPLOAD_JOBS_LOCK:
+            UPLOAD_JOBS[job_id]["status"] = "done"
+            UPLOAD_JOBS[job_id]["result"] = {
+                "ok": True, "checked": total, "live": len(live_entries),
+                "added": added, "dead": dead, "duplicates": duplicates,
+            }
+    except Exception as exc:
+        with UPLOAD_JOBS_LOCK:
+            UPLOAD_JOBS[job_id]["status"] = "error"
+            UPLOAD_JOBS[job_id]["result"] = {"ok": False, "error": str(exc)}
 
 app = Flask(__name__, static_folder=None)
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
@@ -1641,7 +1704,7 @@ def admin_upload_inventory(kind):
         return jsonify({"ok": False, "error": "Loại kho không hợp lệ"}), 400
     uploaded = request.files.get("file")
     if not uploaded or not uploaded.filename:
-        return jsonify({"ok": False, "error": "Vui lòng chọn file .txt hoặc .zip"}), 400
+        return jsonify({"ok": False, "error": "Vui lòng chọn file .txt, .zip hoặc .rar"}), 400
     payload = uploaded.read(50 * 1024 * 1024 + 1)
     if not payload or len(payload) > 50 * 1024 * 1024:
         return jsonify({"ok": False, "error": "File trống hoặc vượt quá 50MB"}), 400
@@ -1650,39 +1713,27 @@ def admin_upload_inventory(kind):
     except ValueError as error:
         return jsonify({"ok": False, "error": str(error)}), 400
 
-    live_entries = []
-    dead = 0
-    with ThreadPoolExecutor(max_workers=min(6, len(entries))) as executor:
-        futures = {executor.submit(run_cookie_check, entry): entry for entry in entries}
-        for future in as_completed(futures):
-            try:
-                success, token, _error, account, _netscape = future.result()
-                if success and token and account.get("membership_status") == "CURRENT_MEMBER":
-                    live_entries.append(futures[future])
-                else:
-                    dead += 1
-            except Exception:
-                app.logger.exception("Uploaded Cookie live check failed")
-                dead += 1
+    # Launch background job so other users are not blocked
+    job_id = uuid.uuid4().hex[:12]
+    with UPLOAD_JOBS_LOCK:
+        UPLOAD_JOBS[job_id] = {
+            "status": "running",
+            "progress": {"checked": 0, "total": len(entries), "live": 0, "dead": 0, "percent": 0},
+            "result": None,
+        }
+    t = threading.Thread(target=_bg_upload_worker, args=(job_id, table, entries), daemon=True)
+    t.start()
+    return jsonify({"ok": True, "job_id": job_id, "total": len(entries), "message": "Đang kiểm tra cookie ở nền..."})
 
-    connection = db()
-    added = 0
-    duplicates = 0
-    for entry in live_entries:
-        if connection.execute(f"SELECT 1 FROM {table} WHERE data=? LIMIT 1", (entry,)).fetchone():
-            duplicates += 1
-            continue
-        connection.execute(f"INSERT INTO {table}(data,is_used) VALUES(?,0)", (entry,))
-        added += 1
-    admin_audit(
-        connection, "inventory.upload", kind,
-        f"checked={len(entries)},live={len(live_entries)},added={added},dead={dead},duplicates={duplicates}",
-    )
-    connection.commit()
-    return jsonify({
-        "ok": True, "checked": len(entries), "live": len(live_entries),
-        "added": added, "dead": dead, "duplicates": duplicates,
-    })
+
+@app.get("/api/admin/inventory/job/<job_id>")
+@admin_required
+def admin_upload_job_status(job_id):
+    with UPLOAD_JOBS_LOCK:
+        job = UPLOAD_JOBS.get(job_id)
+    if not job:
+        return jsonify({"ok": False, "error": "Job không tồn tại"}), 404
+    return jsonify({"ok": True, "status": job["status"], "progress": job["progress"], "result": job["result"]})
 
 
 @app.post("/api/admin/inventory/<kind>/cleanup")
@@ -1737,8 +1788,11 @@ def not_found(_error):
 
 if __name__ == "__main__":
     migrate()
-    app.run(
-        host=os.getenv("MINIAPP_HOST", "127.0.0.1"),
-        port=int(os.getenv("MINIAPP_PORT", "8080")),
-        debug=os.getenv("APP_ENV") == "development",
-    )
+    host = os.getenv("MINIAPP_HOST", "127.0.0.1")
+    port = int(os.getenv("MINIAPP_PORT", "8080"))
+    if os.getenv("APP_ENV") == "development":
+        app.run(host=host, port=port, debug=True)
+    else:
+        from waitress import serve
+        print(f"[MiniApp] Production server (Waitress) on http://{host}:{port}", flush=True)
+        serve(app, host=host, port=port, threads=8, channel_timeout=120)

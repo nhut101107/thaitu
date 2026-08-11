@@ -104,10 +104,48 @@ function replyDialog(ticket) {
 
 function inventoryDialog(kind) {
   const label = kind === "premium" ? "Premium" : "Free";
-  modal(`<div class="eyebrow">KHO ${label.toUpperCase()}</div><h2>Tải và lọc Cookie live</h2><div class="upload-zone"><span>📁</span><b>Chọn file .txt, .zip hoặc .rar</b><small>ZIP/RAR tối đa 10MB · không giới hạn · chỉ đọc các file TXT</small><input type="file" name="file" accept=".txt,.zip,.rar,text/plain,application/zip,application/x-rar-compressed" data-cookie-file></div><button class="button wide" data-upload-cookies>Kiểm tra live & lưu vào kho</button><div class="upload-progress hidden" data-upload-progress><i></i><b>Đang kiểm tra Cookie...</b><small>Giữ Mini App mở, quá trình có thể mất vài phút.</small></div><details class="manual-cookie"><summary>Hoặc nhập thủ công</summary><form data-inventory-form><label class="field">Dữ liệu<textarea name="data" maxlength="60000" required placeholder="NetflixId=...\n---\nNetflixId=..."></textarea></label><button class="button wide">Thêm không kiểm tra live</button></form></details>`, {onOpen(root, close) {
+  modal(`<div class="eyebrow">KHO ${label.toUpperCase()}</div><h2>Tải và lọc Cookie live</h2><div class="upload-zone"><span>📁</span><b>Chọn file .txt, .zip hoặc .rar</b><small>ZIP/RAR tối đa 50MB · không giới hạn · chỉ đọc các file TXT</small><input type="file" name="file" accept=".txt,.zip,.rar,text/plain,application/zip,application/x-rar-compressed" data-cookie-file></div><button class="button wide" data-upload-cookies>Kiểm tra live & lưu vào kho</button><div class="upload-progress hidden" data-upload-progress><i></i><b data-progress-text>Đang kiểm tra Cookie...</b><small data-progress-detail>Xử lý nền – bạn có thể đóng hộp thoại, user khác vẫn dùng bình thường.</small></div><details class="manual-cookie"><summary>Hoặc nhập thủ công</summary><form data-inventory-form><label class="field">Dữ liệu<textarea name="data" maxlength="60000" required placeholder="NetflixId=...\n---\nNetflixId=..."></textarea></label><button class="button wide">Thêm không kiểm tra live</button></form></details>`, {onOpen(root, close) {
     const input = root.querySelector("[data-cookie-file]");
     input.onchange = () => { if (input.files[0]) root.querySelector(".upload-zone b").textContent = input.files[0].name; };
-    root.querySelector("[data-upload-cookies]").onclick = async (event) => { const file = input.files[0]; if (!file) return toast("Hãy chọn file TXT, ZIP hoặc RAR", "error"); const done = busyButton(event.currentTarget, "Đang lọc Cookie live..."); root.querySelector("[data-upload-progress]").classList.remove("hidden"); try { const result = await api.adminUploadInventory(kind, file); close(); await loadAdmin(); toast(`Đã kiểm tra ${result.checked}: thêm ${result.added} live, ${result.dead} lỗi, ${result.duplicates} trùng`); } catch (error) { toast(error.message, "error"); root.querySelector("[data-upload-progress]").classList.add("hidden"); done(); } };
+    root.querySelector("[data-upload-cookies]").onclick = async (event) => {
+      const file = input.files[0];
+      if (!file) return toast("Hãy chọn file TXT, ZIP hoặc RAR", "error");
+      const done = busyButton(event.currentTarget, "Đang tải lên...");
+      root.querySelector("[data-upload-progress]").classList.remove("hidden");
+      try {
+        const result = await api.adminUploadInventory(kind, file);
+        if (result.job_id) {
+          // Background job mode – poll for progress
+          const progressText = root.querySelector("[data-progress-text]");
+          const progressDetail = root.querySelector("[data-progress-detail]");
+          const pollJob = async () => {
+            try {
+              const job = await api.request(`/api/admin/inventory/job/${result.job_id}`);
+              if (job.progress) {
+                progressText.textContent = `Đang kiểm tra... ${job.progress.checked}/${job.progress.total} (${job.progress.percent}%)`;
+                progressDetail.textContent = `✅ Live: ${job.progress.live} · ❌ Lỗi: ${job.progress.dead}`;
+              }
+              if (job.status === "done") {
+                const r = job.result;
+                close(); await loadAdmin();
+                toast(`Hoàn tất: thêm ${r.added} live, ${r.dead} lỗi, ${r.duplicates} trùng`);
+              } else if (job.status === "error") {
+                toast(job.result?.error || "Lỗi xử lý", "error");
+                root.querySelector("[data-upload-progress]").classList.add("hidden"); done();
+              } else {
+                setTimeout(pollJob, 2000);
+              }
+            } catch { setTimeout(pollJob, 3000); }
+          };
+          progressText.textContent = `Đang kiểm tra ${result.total} cookie ở nền...`;
+          progressDetail.textContent = "Xử lý nền – user khác vẫn dùng bình thường.";
+          setTimeout(pollJob, 2000);
+        } else {
+          close(); await loadAdmin();
+          toast(`Đã kiểm tra ${result.checked}: thêm ${result.added} live, ${result.dead} lỗi, ${result.duplicates} trùng`);
+        }
+      } catch (error) { toast(error.message, "error"); root.querySelector("[data-upload-progress]").classList.add("hidden"); done(); }
+    };
     root.querySelector("[data-inventory-form]").onsubmit = async (event) => { event.preventDefault(); const data = new FormData(event.currentTarget).get("data"); try { const result = await api.adminAddInventory(kind, data); close(); await loadAdmin(); toast(`Đã thêm ${result.added} mục, bỏ qua ${result.duplicates} mục trùng`); } catch (error) { toast(error.message, "error"); } };
   }});
 }
