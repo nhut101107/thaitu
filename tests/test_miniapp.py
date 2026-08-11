@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 import zipfile
+from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import urlencode
 
@@ -75,6 +76,23 @@ class MiniAppTest(unittest.TestCase):
         ):
             result = miniapp_server.run_cookie_check("NetflixId=safe", timeout=0.01)
         self.assertEqual(result[2], "network_timeout")
+
+    def test_cookie_check_normal_result_is_preserved(self):
+        account = {"membership_status": "CURRENT_MEMBER"}
+        with patch("code_goc.checker.extract_cookies_from_text", return_value=[{"NetflixId": "safe"}]), patch(
+            "code_goc.checker.check_cookie", return_value=(True, "safe-token", None, account)
+        ), patch("code_goc.checker.build_netscape_format", return_value="netscape"):
+            result = miniapp_server.run_cookie_check("NetflixId=safe", timeout=1)
+        self.assertEqual(result, (True, "safe-token", None, account, "netscape"))
+
+    def test_frontend_nftoken_request_has_timeout_cleanup_and_idempotency(self):
+        api_source = Path("miniapp/assets/api.js").read_text(encoding="utf-8")
+        views_source = Path("miniapp/assets/views.js").read_text(encoding="utf-8")
+        self.assertIn("AbortController", api_source)
+        self.assertIn("finally", api_source)
+        self.assertIn("nftokenJob", api_source)
+        self.assertIn("requestId", views_source)
+        self.assertIn("Thử lại", views_source)
 
     def test_checkout_is_atomic_and_idempotent(self):
         response = self.client.put("/api/cart/1", json={"quantity": 2}, headers=self.headers)
@@ -200,6 +218,99 @@ class MiniAppTest(unittest.TestCase):
             1,
         )
         connection.close()
+
+    def test_nftoken_timeout_returns_reason_refunds_credit_and_returns_cookie(self):
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute("UPDATE users SET nftoken_credits=1 WHERE user_id=1")
+        connection.execute("INSERT INTO premium_cookies(data) VALUES('NetflixId=timeout-cookie')")
+        connection.commit()
+        connection.close()
+        with patch.object(miniapp_server, "run_cookie_check", return_value=(False, None, "network_timeout", {}, None)):
+            response = self.client.post(
+                "/api/tools/nftoken",
+                json={"mode": "plan", "quantity": 1, "requestId": "timeout-request-1"},
+                headers=self.headers,
+            )
+        self.assertEqual(response.status_code, 504)
+        self.assertEqual(response.json["reason_code"], "nftoken_timeout")
+        self.assertNotIn("NetflixId", response.get_data(as_text=True))
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        self.assertEqual(connection.execute("SELECT nftoken_credits FROM users WHERE user_id=1").fetchone()[0], 1)
+        self.assertEqual(connection.execute("SELECT is_used FROM premium_cookies WHERE data='NetflixId=timeout-cookie'").fetchone()[0], 0)
+        self.assertEqual(connection.execute("SELECT status FROM nftoken_jobs WHERE request_id='timeout-request-1'").fetchone()[0], "error")
+        connection.close()
+
+    def test_dead_cookie_is_deleted_but_unknown_failure_is_returned_to_stock(self):
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute("UPDATE users SET nftoken_credits=2 WHERE user_id=1")
+        connection.execute("INSERT INTO premium_cookies(data) VALUES('NetflixId=dead-cookie')")
+        connection.commit()
+        connection.close()
+        with patch.object(miniapp_server, "run_cookie_check", return_value=(False, None, "dead", {}, None)):
+            dead = self.client.post(
+                "/api/tools/nftoken",
+                json={"mode": "plan", "requestId": "dead-request-1"},
+                headers=self.headers,
+            )
+        self.assertEqual(dead.status_code, 409)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute("INSERT INTO premium_cookies(data) VALUES('NetflixId=unknown-cookie')")
+        connection.commit()
+        connection.close()
+        with patch.object(miniapp_server, "run_cookie_check", return_value=(False, None, "checker_exception", {}, None)):
+            unknown = self.client.post(
+                "/api/tools/nftoken",
+                json={"mode": "plan", "requestId": "unknown-request-1"},
+                headers=self.headers,
+            )
+        self.assertEqual(unknown.status_code, 409)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        self.assertIsNone(connection.execute("SELECT id FROM premium_cookies WHERE data='NetflixId=dead-cookie'").fetchone())
+        self.assertEqual(connection.execute("SELECT is_used FROM premium_cookies WHERE data='NetflixId=unknown-cookie'").fetchone()[0], 0)
+        connection.close()
+
+    def test_nftoken_request_id_is_idempotent_and_job_result_is_replayable(self):
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute("UPDATE users SET nftoken_credits=1 WHERE user_id=1")
+        connection.execute("INSERT INTO premium_cookies(data) VALUES('NetflixId=idempotent-cookie')")
+        connection.commit()
+        connection.close()
+        account = {"membership_status": "CURRENT_MEMBER", "email_masked": "tes***@mail.com", "plan": "Premium"}
+        with patch.object(miniapp_server, "run_cookie_check", return_value=(True, "safe-token", None, account, "netscape")) as check:
+            first = self.client.post(
+                "/api/tools/nftoken",
+                json={"mode": "plan", "quantity": 1, "requestId": "same-request-1"},
+                headers=self.headers,
+            )
+            duplicate = self.client.post(
+                "/api/tools/nftoken",
+                json={"mode": "plan", "quantity": 1, "requestId": "same-request-1"},
+                headers=self.headers,
+            )
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(duplicate.status_code, 200)
+        self.assertTrue(duplicate.json["duplicate"])
+        self.assertEqual(check.call_count, 1)
+        replay = self.client.get("/api/tools/nftoken/job/same-request-1", headers=self.headers)
+        self.assertEqual(replay.status_code, 200)
+        self.assertTrue(replay.json["duplicate"])
+
+    def test_running_request_id_does_not_create_duplicate_work(self):
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        now = miniapp_server.now_iso()
+        connection.execute(
+            "INSERT INTO nftoken_jobs(request_id,user_id,mode,quantity,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+            ("running-request-1", 1, "plan", 1, "running", now, now),
+        )
+        connection.commit()
+        connection.close()
+        response = self.client.post(
+            "/api/tools/nftoken",
+            json={"mode": "plan", "requestId": "running-request-1"},
+            headers=self.headers,
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json["reason_code"], "nftoken_in_progress")
 
     def test_tv_login_returns_safe_progress_log(self):
         connection = sqlite3.connect(miniapp_server.DATABASE_PATH)

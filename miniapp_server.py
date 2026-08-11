@@ -65,7 +65,11 @@ CHECKOUT_LOCK = threading.Lock()
 TOOL_ATTEMPTS = {}
 TOOL_LOCK = threading.Lock()
 COOKIE_CHECK_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="nftoken-check")
-COOKIE_CHECK_TIMEOUT = max(10, min(int(os.getenv("MINIAPP_COOKIE_CHECK_TIMEOUT", "45")), 90))
+try:
+    COOKIE_CHECK_TIMEOUT = max(1, min(int(os.getenv("MINIAPP_COOKIE_CHECK_TIMEOUT", "30")), 30))
+except (TypeError, ValueError):
+    COOKIE_CHECK_TIMEOUT = 30
+NFTOKEN_TOTAL_TIMEOUT = 90
 MIGRATION_LOCK = threading.Lock()
 MIGRATED_PATHS = set()
 try:
@@ -379,6 +383,21 @@ def migrate():
             status TEXT NOT NULL DEFAULT 'OPEN',
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS nftoken_jobs(
+            request_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            mode TEXT NOT NULL,
+            quantity INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL DEFAULT 'running',
+            result_json TEXT NOT NULL DEFAULT '{}',
+            reason_code TEXT NOT NULL DEFAULT '',
+            message TEXT NOT NULL DEFAULT '',
+            status_code INTEGER NOT NULL DEFAULT 409,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_nftoken_jobs_user_date
+            ON nftoken_jobs(user_id, created_at DESC);
         CREATE TABLE IF NOT EXISTS miniapp_settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -632,6 +651,10 @@ def migrate():
     }.items():
         if name not in checkout_columns:
             connection.execute(f"ALTER TABLE miniapp_checkouts ADD COLUMN {name} {definition}")
+
+    nftoken_job_columns = column_names(connection, "nftoken_jobs")
+    if "status_code" not in nftoken_job_columns:
+        connection.execute("ALTER TABLE nftoken_jobs ADD COLUMN status_code INTEGER NOT NULL DEFAULT 409")
     connection.commit()
     connection.close()
 
@@ -824,9 +847,10 @@ def telegram_notify(text, reply_markup=None):
 
 
 class ToolError(Exception):
-    def __init__(self, message, status=400):
+    def __init__(self, message, status=400, reason_code="tool_error"):
         super().__init__(message)
         self.status = status
+        self.reason_code = reason_code
 
 
 def reserve_cookie(connection):
@@ -944,6 +968,32 @@ def run_cookie_check(cookie_data, timeout=None):
         return False, None, "network_timeout", {}, None
     netscape = checker.build_netscape_format(cookies) if success and token else None
     return success, token, error, account, netscape
+
+
+def nftoken_failure_reason(error):
+    value = str(error or "").strip().lower()
+    if value == "network_timeout" or "timeout" in value or "thời gian chờ" in value or "phản hồi quá chậm" in value:
+        return "nftoken_timeout"
+    if "connection" in value or "kết nối" in value or "network" in value:
+        return "network_error"
+    if value in {"dead", "cookie_format"} or "cookie hết hạn" in value or "401" in value or "permission_denied" in value:
+        return "cookie_expired"
+    if "cookie" in value and ("invalid" in value or "không hợp lệ" in value or "sai định dạng" in value):
+        return "cookie_invalid"
+    return "nftoken_failed"
+
+
+def nftoken_failure_message(reason_code):
+    return {
+        "nftoken_timeout": "Máy chủ xử lý quá lâu, vui lòng thử lại",
+        "network_error": "Không thể kết nối Netflix, vui lòng thử lại sau",
+        "cookie_expired": "Cookie đã hết hạn hoặc không còn phiên hợp lệ",
+        "cookie_invalid": "Cookie không đúng định dạng",
+    }.get(reason_code, "Không tạo được NFToken lúc này, vui lòng thử lại")
+
+
+def cookie_should_delete(error, reason_code):
+    return reason_code in {"cookie_expired", "cookie_invalid"} or str(error or "").strip().lower() == "dead"
 
 
 def run_tv_login(cookie_data, tv_code):
@@ -1889,15 +1939,24 @@ def free_cookie():
         return jsonify({"ok": False, "error": "Không thể nhận Cookie lúc này"}), 500
 
 
-def generate_one_nftoken(connection, user_id, mode):
+def generate_one_nftoken(connection, user_id, mode, deadline=None):
     cookie_id, cookie_data, quota_source = reserve_nftoken_request(connection, user_id, mode)
     last_error = "Không tìm thấy Cookie hoạt động"
+    last_reason_code = "cookie_unavailable"
     for attempt in range(5):
+        if deadline is not None and time.monotonic() >= deadline:
+            release_cookie(connection, cookie_id, delete=False)
+            refund_nftoken_request(connection, user_id, quota_source)
+            raise ToolError("Máy chủ xử lý quá lâu, vui lòng thử lại", 504, "nftoken_timeout")
         try:
-            success, token, error, account, netscape = run_cookie_check(cookie_data)
+            if deadline is None:
+                success, token, error, account, netscape = run_cookie_check(cookie_data)
+            else:
+                check_timeout = max(0.1, min(COOKIE_CHECK_TIMEOUT, deadline - time.monotonic()))
+                success, token, error, account, netscape = run_cookie_check(cookie_data, timeout=check_timeout)
         except Exception as exc:
-            app.logger.exception("NFToken check failed")
-            success, token, error, account, netscape = False, None, str(exc), {}, None
+            app.logger.error("NFToken check failed type=%s", type(exc).__name__)
+            success, token, error, account, netscape = False, None, "checker_exception", {}, None
         if success and token and account.get("membership_status") == "CURRENT_MEMBER":
             # The validated Cookie is a temporary delivery hold; return it to stock.
             release_cookie(connection, cookie_id, delete=False)
@@ -1911,9 +1970,10 @@ def generate_one_nftoken(connection, user_id, mode):
                 "account": public_account(account),
                 "netscape": netscape,
             }
-        last_error = error or "Tài khoản đã hết hạn"
-        release_cookie(connection, cookie_id, delete=True)
-        if error == "network_timeout":
+        last_reason_code = nftoken_failure_reason(error)
+        last_error = nftoken_failure_message(last_reason_code)
+        release_cookie(connection, cookie_id, delete=cookie_should_delete(error, last_reason_code))
+        if last_reason_code == "nftoken_timeout":
             break
         if attempt < 4:
             try:
@@ -1921,7 +1981,72 @@ def generate_one_nftoken(connection, user_id, mode):
             except ToolError:
                 break
     refund_nftoken_request(connection, user_id, quota_source)
-    raise ToolError(f"Không tạo được NFToken: {last_error}", 409)
+    raise ToolError(last_error, 504 if last_reason_code == "nftoken_timeout" else 409, last_reason_code)
+
+
+def normalize_nftoken_request_id(value):
+    request_id = str(value or "").strip()
+    if not request_id:
+        return uuid.uuid4().hex
+    if not 8 <= len(request_id) <= 100 or not all(char.isalnum() or char in "-_." for char in request_id):
+        raise ToolError("request_id không hợp lệ", 400, "invalid_request_id")
+    return request_id
+
+
+def begin_nftoken_job(connection, user_id, request_id, mode, quantity):
+    connection.execute("BEGIN IMMEDIATE")
+    row = connection.execute(
+        "SELECT * FROM nftoken_jobs WHERE request_id=?", (request_id,)
+    ).fetchone()
+    if row:
+        if int(row["user_id"]) != int(user_id):
+            connection.rollback()
+            raise ToolError("request_id không thuộc tài khoản này", 403, "request_owner_mismatch")
+        connection.commit()
+        return row, False
+    now = now_iso()
+    connection.execute(
+        """INSERT INTO nftoken_jobs(
+            request_id,user_id,mode,quantity,status,result_json,reason_code,message,status_code,created_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+        (request_id, int(user_id), mode, int(quantity), "running", "{}", "", "", 409, now, now),
+    )
+    connection.commit()
+    return None, True
+
+
+def finish_nftoken_job(connection, request_id, status, payload=None, reason_code="", message="", status_code=409):
+    result_json = json.dumps(payload or {}, ensure_ascii=False, separators=(",", ":"))
+    connection.execute(
+        """UPDATE nftoken_jobs
+           SET status=?,result_json=?,reason_code=?,message=?,status_code=?,updated_at=?
+           WHERE request_id=?""",
+        (status, result_json, reason_code, message, int(status_code), now_iso(), request_id),
+    )
+    connection.commit()
+
+
+def nftoken_job_payload(row):
+    if row["status"] == "done":
+        payload = json.loads(row["result_json"] or "{}")
+        payload["request_id"] = row["request_id"]
+        payload["duplicate"] = True
+        return payload, 200
+    if row["status"] == "running":
+        return {
+            "ok": False,
+            "request_id": row["request_id"],
+            "status": "running",
+            "reason_code": "nftoken_in_progress",
+            "error": "NFToken đang được xử lý, vui lòng chờ kết quả",
+        }, 409
+    return {
+        "ok": False,
+        "request_id": row["request_id"],
+        "status": row["status"],
+        "reason_code": row["reason_code"] or "nftoken_failed",
+        "error": row["message"] or "Không tạo được NFToken lúc này",
+    }, int(row["status_code"] or 409)
 
 
 @app.post("/api/tools/nftoken")
@@ -1938,25 +2063,68 @@ def create_nftoken():
     if mode == "plan":
         quantity = 1
     if not 1 <= quantity <= 1:
-        return jsonify({"ok": False, "error": "Mỗi lần chỉ rút từ 1 đến 5 Cookie"}), 400
+        return jsonify({"ok": False, "reason_code": "invalid_quantity", "error": "Mỗi lần chỉ tạo 1 NFToken"}), 400
     user_id = int(g.telegram_user["id"])
+    try:
+        request_id = normalize_nftoken_request_id(body.get("requestId") or body.get("idempotencyKey"))
+    except ToolError as error:
+        return jsonify({"ok": False, "reason_code": error.reason_code, "error": str(error)}), error.status
     connection = db()
     try:
         require_feature(connection, "vipToken" if mode == "vip" else "planToken")
     except ToolError as error:
-        return jsonify({"ok": False, "error": str(error)}), error.status
+        return jsonify({"ok": False, "reason_code": error.reason_code, "error": str(error)}), error.status
+
+    try:
+        existing, created = begin_nftoken_job(connection, user_id, request_id, mode, quantity)
+    except ToolError as error:
+        return jsonify({"ok": False, "reason_code": error.reason_code, "error": str(error)}), error.status
+    if not created:
+        payload, status_code = nftoken_job_payload(existing)
+        return jsonify(payload), status_code
     if tool_rate_limited(user_id, limit=5, window=60):
-        return jsonify({"ok": False, "error": "Bạn thao tác quá nhanh"}), 429
+        finish_nftoken_job(connection, request_id, "error", reason_code="rate_limited", message="Bạn thao tác quá nhanh", status_code=429)
+        return jsonify({"ok": False, "request_id": request_id, "reason_code": "rate_limited", "error": "Bạn thao tác quá nhanh"}), 429
     results = []
+    deadline = time.monotonic() + NFTOKEN_TOTAL_TIMEOUT
     try:
         for _ in range(quantity):
-            results.append(generate_one_nftoken(connection, user_id, mode))
+            results.append(generate_one_nftoken(connection, user_id, mode, deadline=deadline))
     except ToolError as error:
         if not results:
-            return jsonify({"ok": False, "error": str(error)}), error.status
-    return jsonify(
-        {"ok": True, "items": results, "partial": len(results) != quantity, "quota": quota_payload(connection, user_id)}
-    )
+            finish_nftoken_job(connection, request_id, "error", reason_code=error.reason_code, message=str(error), status_code=error.status)
+            return jsonify({"ok": False, "request_id": request_id, "reason_code": error.reason_code, "error": str(error)}), error.status
+    except Exception as error:
+        app.logger.error("NFToken request failed request_id=%s type=%s", request_id, type(error).__name__)
+        finish_nftoken_job(connection, request_id, "error", reason_code="nftoken_failed", message="Không tạo được NFToken lúc này", status_code=500)
+        return jsonify({"ok": False, "request_id": request_id, "reason_code": "nftoken_failed", "error": "Không tạo được NFToken lúc này"}), 500
+    payload = {
+        "ok": True,
+        "request_id": request_id,
+        "items": results,
+        "partial": len(results) != quantity,
+        "quota": quota_payload(connection, user_id),
+    }
+    finish_nftoken_job(connection, request_id, "done", payload=payload, status_code=200)
+    return jsonify(payload)
+
+
+@app.get("/api/tools/nftoken/job/<request_id>")
+@authenticated
+def get_nftoken_job(request_id):
+    try:
+        normalized_id = normalize_nftoken_request_id(request_id)
+    except ToolError as error:
+        return jsonify({"ok": False, "reason_code": error.reason_code, "error": str(error)}), error.status
+    row = db().execute(
+        "SELECT * FROM nftoken_jobs WHERE request_id=? AND user_id=?",
+        (normalized_id, int(g.telegram_user["id"])),
+    ).fetchone()
+    if not row:
+        return jsonify({"ok": False, "reason_code": "job_not_found", "error": "Không tìm thấy yêu cầu NFToken"}), 404
+    payload, status_code = nftoken_job_payload(row)
+    payload["status"] = row["status"]
+    return jsonify(payload), status_code
 
 
 @app.post("/api/tools/tv-login")
