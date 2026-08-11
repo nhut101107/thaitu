@@ -18,6 +18,7 @@ from urllib.parse import parse_qsl, quote, urlparse
 from urllib.request import Request, urlopen
 
 from flask import Flask, g, jsonify, request, send_from_directory
+from account_normalization import normalize_account_payload
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -618,6 +619,8 @@ def legacy_public_account(account):
 
 def public_account(account):
     """Expose complete safe account metadata, never cookies or session tokens."""
+    account = normalize_account_payload(account)
+
     def repair_mojibake(text):
         if not isinstance(text, str):
             return text

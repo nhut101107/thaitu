@@ -12,17 +12,17 @@ import random
 import sqlite3
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, MenuButtonWebApp
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonCommands
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from urllib.parse import quote
+from account_normalization import decode_escaped_text, normalize_account_payload, normalize_profiles
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATABASE_PATH = os.getenv('BOT_DATABASE_PATH', os.path.join(APP_DIR, 'bot_database.db'))
 TOKEN_FILE = os.path.join(APP_DIR, 'tokenbot.txt')
 ADMIN_ID = int(os.getenv('TELEGRAM_ADMIN_ID', '5992662564'))
-MINIAPP_URL = os.getenv('TELEGRAM_MINIAPP_URL', '').strip()
 
 def get_connection():
     return sqlite3.connect(DATABASE_PATH, timeout=30, check_same_thread=False)
@@ -722,17 +722,11 @@ def progress_bar(current: int, total: int, ok: int) -> str:
     )
 
 def format_account_card(account: dict, link: str, index: int = 0) -> str:
+    account = normalize_account_payload(account)
+
     def normalize_display(value):
         if isinstance(value, str):
-            text = value.strip()
-            try:
-                text = re.sub(r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m.group(1), 16)), text)
-                text = re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1), 16)), text)
-                text = text.encode('utf-16', 'surrogatepass').decode('utf-16')
-            except Exception: pass
-            import html as html_mod
-            text = html_mod.unescape(text)
-            return repair_mojibake(text)
+            return decode_escaped_text(value)
         if isinstance(value, bool): return 'Có' if value else 'Không'
         if isinstance(value, (int, float)): return str(value)
         if isinstance(value, dict):
@@ -765,7 +759,7 @@ def format_account_card(account: dict, link: str, index: int = 0) -> str:
     video_quality = normalize_display(account.get('video_quality', 'N/A'))
     extra_member = normalize_display(account.get('extra_member', 'N/A'))
     profile_count = normalize_display(account.get('profile_count', 'N/A'))
-    profiles = [normalize_display(p) for p in account.get('profiles', []) if normalize_display(p)]
+    profiles = normalize_profiles(account.get('profiles', []))
 
     def known_or(value: str, fallback: str = 'Không xác định') -> str:
         return fallback if str(value).strip().casefold() in {
@@ -1228,6 +1222,8 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
         if not ctx:
             return
 
+        info.setdefault('_account_name_candidates', [])
+
         models = ctx.get('models', {})
         if isinstance(models, dict):
             for model_name, model_data in models.items():
@@ -1258,6 +1254,8 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
                     ]:
                         if field in inner and info.get(targets, 'N/A') == 'N/A':
                             raw_val = self._unwrap_falcor(inner[field])
+                            if targets == 'account_name' and raw_val:
+                                info['_account_name_candidates'].append(raw_val)
                             if raw_val and (isinstance(raw_val, (str, int, float)) or
                                              (targets == 'country' and isinstance(raw_val, dict))):
                                 val = str(raw_val)
@@ -1311,6 +1309,8 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
 
         for key in ['firstName', 'displayName', 'accountName']:
             val = found.get(key)
+            if val:
+                info['_account_name_candidates'].append(val)
             if val and isinstance(val, str) and info['account_name'] == 'N/A':
                 info['account_name'] = val
                 break
@@ -1448,6 +1448,7 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
         if info['account_name'] == 'N/A':
             m = re.search(r'"(?:firstName|displayName|accountName)"\s*:\s*"([^"]{1,50})"', html)
             if m:
+                info.setdefault('_account_name_candidates', []).append(m.group(1))
                 info['account_name'] = m.group(1)
 
         if info['phone'] == 'N/A':
@@ -1555,6 +1556,7 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
             'cc_type': 'N/A', 'last4': 'N/A', 'payment_on_hold': 'N/A',
             'video_quality': 'N/A', 'max_streams': 'N/A', 'extra_member': 'N/A',
             'extra_member_slots': 'N/A', 'profile_count': 'N/A', 'profiles': [],
+            '_account_name_candidates': [],
         }
         try:
             cookie_str = self.build_cookie_string(cookie_dict)
@@ -1742,7 +1744,9 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
         except Exception as e:
             logger.error(f"get_account_info error: {e}")
 
-        return info
+        normalized = normalize_account_payload(info)
+        normalized.pop('_account_name_candidates', None)
+        return normalized
 
     def check_cookie(self, cookie_dict: Dict[str, str]) -> Tuple[bool, Optional[str], Optional[str], Dict[str, str]]:
         if 'NetflixId' not in cookie_dict:
@@ -2279,8 +2283,6 @@ def process_tv_login(cookie_dict: dict, tv_code: str) -> Tuple[bool, str, str, d
 
 def kb_main():
     rows = []
-    if MINIAPP_URL.startswith('https://'):
-        rows.append([InlineKeyboardButton("🚀 MỞ NFToken MINI APP", web_app=WebAppInfo(MINIAPP_URL))])
     rows.extend([
         [InlineKeyboardButton("🛒 Cửa Hàng", callback_data='store_main'), InlineKeyboardButton("💸 Nạp Tiền", callback_data='deposit_main')],
         [InlineKeyboardButton("Lấy Cookie (Đã Mua)", callback_data='extract_vip'), InlineKeyboardButton("Tạo Link (Theo Gói)", callback_data='menu_chk')],
@@ -2289,36 +2291,15 @@ def kb_main():
     ])
     return InlineKeyboardMarkup(rows)
 
-async def cmd_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Public entry point: every user can open the Mini App without an admin check."""
-    if not await check_user_status(update, context): return
-    if not MINIAPP_URL.startswith('https://'):
-        await update.effective_message.reply_text(
-            "⚠️ Mini App chưa được bật công khai. Admin cần cấu hình TELEGRAM_MINIAPP_URL bằng URL HTTPS."
-        )
-        return
-    await update.effective_message.reply_text(
-        "🚀 Bấm nút bên dưới để mở NFToken Pro Mini App.",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🚀 MỞ MINI APP", web_app=WebAppInfo(MINIAPP_URL))]
-        ]),
-    )
-
-async def configure_miniapp_menu(application):
-    """Expose the app from Telegram's public bot menu for all chats."""
-    if not MINIAPP_URL.startswith('https://'):
-        logger.warning("TELEGRAM_MINIAPP_URL chưa phải HTTPS; bỏ qua menu Mini App")
-        return
+async def reset_bot_menu(application):
+    """Remove the previously configured Mini App menu button."""
     try:
         await application.bot.set_chat_menu_button(
-            menu_button=MenuButtonWebApp(
-                text="Mở Mini App",
-                web_app=WebAppInfo(MINIAPP_URL),
-            )
+            menu_button=MenuButtonCommands()
         )
-        logger.info("Đã bật nút công khai Mở Mini App: %s", MINIAPP_URL)
+        logger.info("Đã đặt menu Telegram về danh sách lệnh")
     except Exception:
-        logger.exception("Không thể cấu hình menu Mini App công khai")
+        logger.exception("Không thể đặt lại menu Telegram")
 
 async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_user_status(update, context): return
@@ -3746,7 +3727,7 @@ def main():
     application = (
         Application.builder()
         .token(token)
-        .post_init(configure_miniapp_menu)
+        .post_init(reset_bot_menu)
         .concurrent_updates(16)
         .connect_timeout(15)
         .read_timeout(30)
@@ -3756,7 +3737,6 @@ def main():
     )
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("app", cmd_app))
     application.add_handler(CommandHandler("me", cmd_me))
     application.add_handler(CommandHandler("giftcode", cmd_giftcode))
     application.add_handler(CommandHandler("freecookie", cmd_freecookie))
