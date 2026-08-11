@@ -45,6 +45,7 @@ if ($env:TELEGRAM_MINIAPP_URL -notlike "https://*") {
 
 $LogDir = Join-Path $AppDir "logs"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+$env:PYTHONIOENCODING = "utf-8"
 $miniLog = Join-Path $LogDir "miniapp.log"
 $miniErr = Join-Path $LogDir "miniapp.error.log"
 $botLog = Join-Path $LogDir "bot.log"

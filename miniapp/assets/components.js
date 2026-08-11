@@ -33,7 +33,8 @@ export function bottomNav(route) {
 
 export function productCard(item) {
   const totalBenefits = (item.nftokenCredits || 0) + (item.credits || 0);
-  const image = item.imageUrl ? `<img src="${escapeHtml(item.imageUrl)}" alt="" loading="lazy">` : `<div class="product-placeholder"><span>N</span><small>${totalBenefits} lượt</small></div>`;
+  const fallback = `<div class="product-placeholder" ${item.imageUrl ? "hidden" : ""}><span>N</span><small>${totalBenefits} lượt</small></div>`;
+  const image = item.imageUrl ? `<img src="${escapeHtml(item.imageUrl)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.hidden=true;this.nextElementSibling.hidden=false">${fallback}` : fallback;
   return `<article class="product-card" data-product="${item.id}"><div class="product-image">${image}${item.featured ? '<em>Nổi bật</em>' : ''}</div><h3>${escapeHtml(item.name)}</h3><p>${icon("shield")} ${item.available ? "Đang bán" : "Tạm hết"} · ${item.warrantyDays ? `${item.warrantyDays} ngày BH` : "Giao tự động"}</p><footer><strong>${formatMoney(item.price)}</strong><button data-add="${item.id}" aria-label="Thêm vào giỏ">${icon("plus")}</button></footer></article>`;
 }
 

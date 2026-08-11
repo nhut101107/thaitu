@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from functools import wraps
 from urllib.error import URLError
-from urllib.parse import parse_qsl, quote
+from urllib.parse import parse_qsl, quote, urlparse
 from urllib.request import Request, urlopen
 
 from flask import Flask, g, jsonify, request, send_from_directory
@@ -25,6 +25,18 @@ DATABASE_PATH = os.getenv("BOT_DATABASE_PATH", os.path.join(BASE_DIR, "bot_datab
 STATIC_DIR = os.path.join(BASE_DIR, "miniapp")
 AUTH_MAX_AGE = int(os.getenv("MINIAPP_AUTH_MAX_AGE", "3600"))
 PAGE_SIZE = 20
+TV_LOGIN_RUNTIME_VERSION = "tv-login-runtime-r9"
+
+
+def source_fingerprint():
+    digest = hashlib.sha256()
+    for filename in ("miniapp_server.py", "code_goc.py"):
+        with open(os.path.join(BASE_DIR, filename), "rb") as source_file:
+            digest.update(source_file.read())
+    return digest.hexdigest()[:20]
+
+
+SOURCE_FINGERPRINT = source_fingerprint()
 
 def env_int(name, default):
     try:
@@ -588,11 +600,11 @@ def run_tv_login(cookie_data, tv_code):
 
     parsed = checker.extract_cookies_from_text(cookie_data)
     if not parsed:
-        return False, "Cookie sai định dạng", {}
+        return False, "cookie_format", "Cookie sai định dạng", {}
     return process_tv_login(parsed[0], tv_code)
 
 
-def public_account(account):
+def legacy_public_account(account):
     return {
         "name": account.get("account_name", "Không rõ"),
         "email": account.get("email_masked", "Không rõ"),
@@ -601,6 +613,72 @@ def public_account(account):
         "status": account.get("membership_status", "Không rõ"),
         "quality": account.get("video_quality", "Không rõ"),
         "profiles": account.get("profile_count", "Không rõ"),
+    }
+
+
+def public_account(account):
+    """Expose complete safe account metadata, never cookies or session tokens."""
+    def repair_mojibake(text):
+        if not isinstance(text, str):
+            return text
+        repaired = text
+        for _ in range(2):
+            if not any(marker in repaired for marker in ("Ã", "Â", "Ä", "Å", "Æ", "â€", "ðŸ", "á»")):
+                break
+            candidate = None
+            for encoding in ("latin-1", "cp1252"):
+                try:
+                    candidate = repaired.encode(encoding).decode("utf-8")
+                    break
+                except (UnicodeEncodeError, UnicodeDecodeError):
+                    continue
+            if candidate is None:
+                break
+            if candidate == repaired:
+                break
+            repaired = candidate
+        return repaired
+
+    def value(key, fallback="Không rõ"):
+        raw = account.get(key, fallback)
+        if raw is None or raw == "" or raw == "N/A":
+            return fallback
+        if isinstance(raw, (dict, list)):
+            return ", ".join(str(item) for item in raw) if isinstance(raw, list) else str(raw)
+        return repair_mojibake(str(raw))
+
+    profiles = account.get("profiles") or []
+    details = [
+        ("Tên tài khoản", value("account_name")),
+        ("Email", value("email_masked")),
+        ("Số điện thoại", value("phone")),
+        ("Quốc gia", value("country")),
+        ("Tiền tệ", value("country_currency")),
+        ("Trạng thái", value("membership_status")),
+        ("Gói cước", value("plan")),
+        ("Giá gói", value("plan_price")),
+        ("Ngày tham gia", value("member_since")),
+        ("Kỳ thanh toán tiếp theo", value("next_billing")),
+        ("Phương thức thanh toán", value("payment_method")),
+        ("Loại thẻ", value("cc_type")),
+        ("4 số cuối", value("last4")),
+        ("Tạm giữ thanh toán", value("payment_on_hold")),
+        ("Chất lượng video", value("video_quality")),
+        ("Số luồng tối đa", value("max_streams")),
+        ("Extra Member", value("extra_member")),
+        ("Số slot Extra Member", value("extra_member_slots")),
+        ("Số profile", value("profile_count", str(len(profiles)))),
+        ("Profiles", ", ".join(str(item) for item in profiles) if profiles else "Không rõ"),
+    ]
+    return {
+        "name": value("account_name"),
+        "email": value("email_masked"),
+        "plan": value("plan"),
+        "country": value("country"),
+        "status": value("membership_status"),
+        "quality": value("video_quality"),
+        "profiles": value("profile_count", str(len(profiles))),
+        "details": [{"label": label, "value": item} for label, item in details],
     }
 
 
@@ -618,7 +696,35 @@ def ensure_user(connection, telegram_user):
     return user_id
 
 
-def product_dict(row):
+def auto_product_image(name, category):
+    """Create a lightweight product artwork when Admin leaves image_url empty."""
+    title = html.escape(str(name or "NFToken")[:28])
+    label = html.escape(str(category or "Gói dịch vụ")[:32])
+    value = f"{name or ''} {category or ''}".lower()
+    if "spotify" in value:
+        glyph = "♫"
+    elif "netflix" in value or "cookie" in value:
+        glyph = "N"
+    elif "vip" in value:
+        glyph = "✦"
+    elif "token" in value:
+        glyph = "◆"
+    else:
+        glyph = "N"
+    svg = f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 420">
+      <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#09090b"/><stop offset=".58" stop-color="#27272a"/><stop offset="1" stop-color="#52525b"/></linearGradient></defs>
+      <rect width="720" height="420" rx="42" fill="url(#g)"/>
+      <circle cx="560" cy="92" r="130" fill="none" stroke="#fff" stroke-opacity=".16" stroke-width="2"/>
+      <path d="M-40 330 Q190 80 430 330 T800 210" fill="none" stroke="#fff" stroke-opacity=".15" stroke-width="3"/>
+      <text x="52" y="92" fill="#fff" fill-opacity=".68" font-family="Arial,sans-serif" font-size="24" letter-spacing="4">NFTOKEN PRO</text>
+      <text x="52" y="270" fill="#fff" font-family="Arial,sans-serif" font-size="150" font-weight="700">{glyph}</text>
+      <text x="570" y="330" text-anchor="end" fill="#fff" font-family="Arial,sans-serif" font-size="42" font-weight="700">{title}</text>
+      <text x="570" y="365" text-anchor="end" fill="#fff" fill-opacity=".62" font-family="Arial,sans-serif" font-size="18" letter-spacing="2">{label}</text>
+    </svg>'''
+    return "data:image/svg+xml;charset=UTF-8," + quote(svg, safe="")
+
+
+def product_dict(row, include_auto_image=True):
     return {
         "id": row["id"],
         "name": row["name"],
@@ -630,7 +736,7 @@ def product_dict(row):
             f"{row['credits']} lượt lấy Cookie VIP."
         ),
         "category": row["category"] or "Gói Cookie VIP",
-        "imageUrl": row["image_url"] or "",
+        "imageUrl": (row["image_url"] or auto_product_image(row["name"], row["category"])) if include_auto_image else (row["image_url"] or ""),
         "featured": bool(row["featured"]),
         "warrantyDays": row["warranty_days"] or 0,
         "available": bool(row["active"]),
@@ -666,7 +772,12 @@ def assets(filename):
 
 @app.get("/api/health")
 def health():
-    return jsonify({"ok": True, "service": "NFToken Pro Mini App"})
+    return jsonify({
+        "ok": True,
+        "service": "NFToken Pro Mini App",
+        "runtime_version": TV_LOGIN_RUNTIME_VERSION,
+        "source_fingerprint": SOURCE_FINGERPRINT,
+    })
 
 
 @app.get("/api/bootstrap")
@@ -1120,40 +1231,61 @@ def tv_login():
     try:
         tv_code = str(json_body().get("code", "")).replace(" ", "").replace("-", "")
     except ValueError as error:
-        return jsonify({"ok": False, "error": str(error)}), 400
-    if not (4 <= len(tv_code) <= 12 and tv_code.isalnum()):
-        return jsonify({"ok": False, "error": "Mã TV không hợp lệ", "steps": steps("validate", True)}), 400
+        return jsonify({"ok": False, "reason_code": "invalid_request", "error": str(error)}), 400
+    if not (len(tv_code) == 8 and tv_code.isdigit()):
+        return jsonify({"ok": False, "reason_code": "invalid_code", "error": "Mã TV phải gồm đúng 8 chữ số", "steps": steps("validate", True)}), 400
     user_id = int(g.telegram_user["id"])
     if tool_rate_limited(user_id, limit=3, window=60):
-        return jsonify({"ok": False, "error": "Bạn thao tác quá nhanh"}), 429
+        return jsonify({"ok": False, "reason_code": "rate_limited", "error": "Bạn thao tác quá nhanh"}), 429
     connection = db()
     try:
         require_feature(connection, "tv")
     except ToolError as error:
-        return jsonify({"ok": False, "error": str(error), "steps": steps("validate", True)}), error.status
+        return jsonify({"ok": False, "reason_code": "feature_disabled", "error": str(error), "steps": steps("validate", True)}), error.status
     cookie_id = None
+    reserved_cookie_ids = []
+
+    def release_reserved_cookies():
+        while reserved_cookie_ids:
+            reserved_id = reserved_cookie_ids.pop()
+            release_cookie(connection, reserved_id, delete=False)
+
     try:
-        cookie_id, cookie_data = reserve_cookie(connection)
-        success, message, account = run_tv_login(cookie_data, tv_code)
-        dead_cookie = any(word in message.lower() for word in ("cookie đã chết", "cookie hết hạn", "cookie sai"))
-        release_cookie(connection, cookie_id, delete=dead_cookie)
-        cookie_id = None
-        if not success:
-            failed_stage = "cookie" if dead_cookie else "connect"
-            return jsonify({"ok": False, "error": message, "steps": steps(failed_stage, True)}), 409
-        return jsonify({
-            "ok": True,
-            "message": "TV đã được kết nối",
-            "account": public_account(account),
-            "steps": steps("done"),
-        })
+        last_message = "Kho Cookie Premium đang trống"
+        last_reason_code = "cookie_unavailable"
+        for _attempt in range(3):
+            cookie_id, cookie_data = reserve_cookie(connection)
+            reserved_cookie_ids.append(cookie_id)
+            success, reason_code, message, account = run_tv_login(cookie_data, tv_code)
+            last_reason_code = reason_code
+            last_message = message
+            dead_cookie = reason_code in ("cookie_expired", "cookie_format")
+            cookie_id = None
+            if success:
+                release_reserved_cookies()
+                return jsonify({
+                    "ok": True,
+                    "reason_code": "connected",
+                    "message": "TV đã được kết nối",
+                    "account": public_account(account),
+                    "steps": steps("done"),
+                })
+            if not dead_cookie:
+                release_reserved_cookies()
+                failed_stage = "browser" if reason_code in ("browser_missing", "webdriver_missing", "webdriver_error", "browser_error", "network_timeout", "selector_changed", "submit_failed") else "connect"
+                return jsonify({"ok": False, "reason_code": reason_code, "error": message, "steps": steps(failed_stage, True)}), 409
+
+        release_reserved_cookies()
+        return jsonify({"ok": False, "reason_code": last_reason_code, "error": last_message, "steps": steps("cookie", True)}), 409
     except ToolError as error:
-        return jsonify({"ok": False, "error": str(error), "steps": steps("cookie", True)}), error.status
+        release_reserved_cookies()
+        reason_code = last_reason_code if last_reason_code != "cookie_unavailable" else "cookie_unavailable"
+        message = last_message if last_reason_code != "cookie_unavailable" else str(error)
+        return jsonify({"ok": False, "reason_code": reason_code, "error": message, "steps": steps("cookie", True)}), error.status
     except Exception:
-        if cookie_id is not None:
-            release_cookie(connection, cookie_id)
+        release_reserved_cookies()
         app.logger.exception("TV login failed for user_id=%s", user_id)
-        return jsonify({"ok": False, "error": "Không thể đăng nhập TV lúc này", "steps": steps("browser", True)}), 500
+        return jsonify({"ok": False, "reason_code": "server_error", "error": "Không thể đăng nhập TV lúc này", "steps": steps("browser", True)}), 500
 
 
 @app.post("/api/giftcode")
@@ -1302,7 +1434,7 @@ def admin_product_values(body):
         raise ValueError("Mô tả hoặc danh mục quá dài")
     if price < 0 or credits < 0 or nftoken_credits < 0 or not 0 <= warranty_days <= 3650:
         raise ValueError("Thông số sản phẩm không hợp lệ")
-    if image_url and not image_url.startswith("https://"):
+    if image_url and (not image_url.startswith("https://") or not urlparse(image_url).netloc):
         raise ValueError("Ảnh sản phẩm phải dùng liên kết HTTPS")
     return (
         name, price, credits, nftoken_credits, description, category, image_url,
@@ -1382,7 +1514,7 @@ def admin_dashboard():
     return jsonify({
         "ok": True,
         "stats": stats,
-        "products": [product_dict(row) for row in products],
+        "products": [product_dict(row, include_auto_image=False) for row in products],
         "plans": [dict(row) for row in plans],
         "users": [dict(row) for row in users],
         "transactions": [dict(row) for row in transactions],
@@ -1404,17 +1536,30 @@ def admin_create_product():
     try:
         values = admin_product_values(json_body())
     except ValueError as error:
-        return jsonify({"ok": False, "error": str(error)}), 400
+        return jsonify({"ok": False, "reason_code": "product_validation_error", "error": str(error)}), 400
     connection = db()
-    cursor = connection.execute(
-        """INSERT INTO store
-           (name,price,credits,nftoken_credits,description,category,image_url,featured,warranty_days,active)
-           VALUES(?,?,?,?,?,?,?,?,?,?)""",
-        values,
-    )
-    admin_audit(connection, "product.create", cursor.lastrowid, values[0])
-    connection.commit()
-    return jsonify({"ok": True, "id": cursor.lastrowid})
+    try:
+        cursor = connection.execute(
+            """INSERT INTO store
+               (name,price,credits,nftoken_credits,description,category,image_url,featured,warranty_days,active)
+               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            values,
+        )
+        admin_audit(connection, "product.create", cursor.lastrowid, values[0])
+        connection.commit()
+        return jsonify({"ok": True, "id": cursor.lastrowid})
+    except sqlite3.OperationalError:
+        connection.rollback()
+        app.logger.exception("Admin product create database error")
+        return jsonify({"ok": False, "reason_code": "database_schema_error", "error": "Database sản phẩm chưa sẵn sàng, hãy khởi động lại Mini App"}), 500
+    except sqlite3.Error:
+        connection.rollback()
+        app.logger.exception("Admin product create sqlite error")
+        return jsonify({"ok": False, "reason_code": "product_database_error", "error": "Không thể lưu sản phẩm vào database"}), 500
+    except Exception:
+        connection.rollback()
+        app.logger.exception("Admin product create unexpected error")
+        return jsonify({"ok": False, "reason_code": "product_create_failed", "error": "Không thể tạo sản phẩm lúc này"}), 500
 
 
 @app.put("/api/admin/products/<int:item_id>")
@@ -1423,7 +1568,7 @@ def admin_update_product(item_id):
     try:
         values = admin_product_values(json_body())
     except ValueError as error:
-        return jsonify({"ok": False, "error": str(error)}), 400
+        return jsonify({"ok": False, "reason_code": "product_validation_error", "error": str(error)}), 400
     connection = db()
     updated = connection.execute(
         """UPDATE store SET name=?,price=?,credits=?,nftoken_credits=?,description=?,category=?,image_url=?,
@@ -1436,6 +1581,37 @@ def admin_update_product(item_id):
     if updated.rowcount != 1:
         return jsonify({"ok": False, "error": "Không tìm thấy sản phẩm"}), 404
     return jsonify({"ok": True})
+
+
+@app.delete("/api/admin/products/<int:item_id>")
+@admin_required
+def admin_delete_product(item_id):
+    connection = db()
+    product = connection.execute("SELECT id,name FROM store WHERE id=?", (item_id,)).fetchone()
+    if product is None:
+        return jsonify({"ok": False, "reason_code": "product_not_found", "error": "Không tìm thấy sản phẩm"}), 404
+    try:
+        purchase_count = connection.execute(
+            "SELECT COUNT(*) FROM purchase_history WHERE store_item_id=?", (item_id,)
+        ).fetchone()[0]
+        if purchase_count:
+            connection.execute("UPDATE store SET active=0 WHERE id=?", (item_id,))
+            admin_audit(connection, "product.archive", item_id, product["name"])
+            connection.commit()
+            return jsonify({
+                "ok": True,
+                "archived": True,
+                "message": "Sản phẩm đã có đơn nên được ẩn để giữ lịch sử mua hàng",
+            })
+        connection.execute("DELETE FROM miniapp_cart WHERE store_item_id=?", (item_id,))
+        connection.execute("DELETE FROM store WHERE id=?", (item_id,))
+        admin_audit(connection, "product.delete", item_id, product["name"])
+        connection.commit()
+        return jsonify({"ok": True, "deleted": True})
+    except sqlite3.Error:
+        connection.rollback()
+        app.logger.exception("Admin product delete sqlite error")
+        return jsonify({"ok": False, "reason_code": "product_delete_failed", "error": "Không thể xoá sản phẩm lúc này"}), 500
 
 
 @app.put("/api/admin/plans/<path:plan_name>")

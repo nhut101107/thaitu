@@ -194,7 +194,7 @@ class MiniAppTest(unittest.TestCase):
         connection.commit()
         connection.close()
         account = {"account_name": "Test", "email_masked": "tes***@mail.com", "plan": "Premium", "membership_status": "CURRENT_MEMBER"}
-        with patch.object(miniapp_server, "run_tv_login", return_value=(True, "Thành công", account)):
+        with patch.object(miniapp_server, "run_tv_login", return_value=(True, "connected", "Thành công", account)):
             response = self.client.post("/api/tools/tv-login", json={"code": "12345678"}, headers=self.headers)
         self.assertEqual(response.status_code, 200)
         self.assertEqual([step["status"] for step in response.json["steps"]], ["done"] * 5)
@@ -342,6 +342,31 @@ class MiniAppTest(unittest.TestCase):
         self.assertEqual(connection.execute("SELECT status FROM miniapp_support WHERE id=?", (ticket_id,)).fetchone()[0], "CLOSED")
         connection.close()
 
+    def test_admin_can_delete_unused_product_and_preserve_image_url(self):
+        invalid = self.client.post(
+            "/api/admin/products",
+            json={"name": "Invalid image", "category": "VIP", "imageUrl": "http://example.com/a.png"},
+            headers=self.headers,
+        )
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(invalid.json["reason_code"], "product_validation_error")
+        product = self.client.post(
+            "/api/admin/products",
+            json={"name": "IMAGE PRODUCT", "price": 1000, "category": "VIP", "imageUrl": "https://example.com/a.png"},
+            headers=self.headers,
+        )
+        self.assertEqual(product.status_code, 200)
+        product_id = product.json["id"]
+        dashboard = self.client.get("/api/admin/dashboard", headers=self.headers)
+        item = next(item for item in dashboard.json["products"] if item["id"] == product_id)
+        self.assertEqual(item["imageUrl"], "https://example.com/a.png")
+        public = self.client.get("/api/products", headers=self.headers)
+        public_item = next(item for item in public.json["items"] if item["id"] == product_id)
+        self.assertEqual(public_item["imageUrl"], "https://example.com/a.png")
+        deleted = self.client.delete(f"/api/admin/products/{product_id}", headers=self.headers)
+        self.assertEqual(deleted.status_code, 200)
+        self.assertTrue(deleted.json["deleted"])
+
     def test_admin_controls_features_inventory_orders_maintenance_and_audit(self):
         settings = self.client.put(
             "/api/admin/settings",
@@ -440,6 +465,79 @@ class MiniAppTest(unittest.TestCase):
         self.assertTrue(any("live-cookie" in value for value in saved))
         self.assertTrue(any("folder-live" in value for value in saved))
         connection.close()
+
+    def test_tv_login_returns_reason_code_for_each_backend_failure(self):
+        cases = [
+            ("tv_code_expired", "Netflix xác nhận mã đã hết hạn"),
+            ("cookie_expired", "Cookie đã chết hoặc hết hạn"),
+            ("selector_changed", "Netflix chưa hiển thị ô nhập mã"),
+            ("network_timeout", "Netflix phản hồi quá chậm"),
+            ("webdriver_error", "EdgeDriver gặp lỗi"),
+            ("netflix_error", "Netflix trả về lỗi"),
+        ]
+        for reason_code, message in cases:
+            with self.subTest(reason_code=reason_code):
+                miniapp_server.TOOL_ATTEMPTS.clear()
+                connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+                connection.execute("INSERT INTO premium_cookies(data,is_used) VALUES(?,0)", ("NetflixId=test",))
+                connection.commit()
+                connection.close()
+                with patch.object(
+                    miniapp_server,
+                    "run_tv_login",
+                    return_value=(False, reason_code, message, {}),
+                ):
+                    response = self.client.post(
+                        "/api/tools/tv-login",
+                        json={"code": "12345678"},
+                        headers=self.headers,
+                    )
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.json["reason_code"], reason_code)
+                self.assertNotIn("NetflixId", response.get_data(as_text=True))
+                self.assertNotIn("SecureNetflixId", response.get_data(as_text=True))
+
+    def test_tv_login_only_reports_connected_for_explicit_success(self):
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute("INSERT INTO premium_cookies(data,is_used) VALUES(?,0)", ("NetflixId=test",))
+        connection.commit()
+        connection.close()
+        with patch.object(
+            miniapp_server,
+            "run_tv_login",
+            return_value=(True, "connected", "Thành công", {"account_name": "Test"}),
+        ):
+            response = self.client.post(
+                "/api/tools/tv-login",
+                json={"code": "12345678"},
+                headers=self.headers,
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["reason_code"], "connected")
+
+    def test_tv_login_rejects_invalid_code_with_reason_code(self):
+        response = self.client.post(
+            "/api/tools/tv-login",
+            json={"code": "1234"},
+            headers=self.headers,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json["reason_code"], "invalid_code")
+
+    def test_health_exposes_runtime_source_fingerprint(self):
+        response = self.client.get("/api/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["runtime_version"], miniapp_server.TV_LOGIN_RUNTIME_VERSION)
+        self.assertEqual(len(response.json["source_fingerprint"]), 20)
+
+    def test_account_name_repairs_encoding_and_markdown_special_chars(self):
+        account = {"account_name": "NguyÃªn_VÄƒn[*]", "email_masked": "n***@mail.com"}
+        public = miniapp_server.public_account(account)
+        self.assertEqual(public["name"], "Nguyên_Văn[*]")
+        from code_goc import format_account_card
+        card = format_account_card(account, "https://example.invalid")
+        self.assertIn("Nguyên\\_Văn\\[", card)
+        self.assertNotIn("NguyÃªn", card)
 
 if __name__ == "__main__":
     unittest.main()

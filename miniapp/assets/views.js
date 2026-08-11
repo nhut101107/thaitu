@@ -1,6 +1,6 @@
 import {api} from "./api.js";
 import {state, update} from "./state.js";
-import {emptyState, escapeHtml, formatMoney, icon, modal, productCard, skeleton, toast} from "./components.js";
+import {emptyState, escapeHtml, formatMoney, icon, modal, productCard, skeleton, toast} from "./components.js?v=10";
 
 function section(title, body, action = "") {
   return `<section class="content-section"><div class="section-title"><div><small>NFToken Pro</small><h2>${title}</h2></div>${action}</div>${body}</section>`;
@@ -124,8 +124,20 @@ function busyButton(button, text = "Đang xử lý...") {
   return () => { button.disabled = false; button.textContent = old; };
 }
 
-function accountSummary(account = {}) {
+function legacyAccountSummary(account = {}) {
   return `<dl><div><dt>Email</dt><dd>${escapeHtml(account.email || "Không rõ")}</dd></div><div><dt>Gói</dt><dd>${escapeHtml(account.plan || "Không rõ")}</dd></div><div><dt>Quốc gia</dt><dd>${escapeHtml(account.country || "Không rõ")}</dd></div><div><dt>Trạng thái</dt><dd>${escapeHtml(account.status || "Không rõ")}</dd></div></dl>`;
+}
+
+function accountSummary(account = {}) {
+  const rows = Array.isArray(account.details) && account.details.length
+    ? account.details
+    : [
+        {label: "Email", value: account.email},
+        {label: "Gói", value: account.plan},
+        {label: "Quốc gia", value: account.country},
+        {label: "Trạng thái", value: account.status},
+      ];
+  return `<section class="account-summary"><div class="account-summary-head"><b>Thông tin tài khoản</b><small>Credential nhạy cảm đã được ẩn</small></div><div class="account-detail-grid">${rows.map((row) => `<div class="account-detail"><span>${escapeHtml(row.label || "Thông tin")}</span><strong>${escapeHtml(row.value || "Không rõ")}</strong></div>`).join("")}</div></section>`;
 }
 
 export function openNftoken(mode = "plan") {
@@ -165,13 +177,13 @@ function tvLogMarkup(items = []) {
 }
 
 export function openTvLogin() {
-  modal(`<div class="tv-hero"><span>📺</span><div><div class="eyebrow">NETFLIX TV CONNECT</div><h2>Đăng nhập TV an toàn</h2></div></div><p class="modal-lead">Mở Netflix trên TV → chọn <b>Đăng nhập từ trang web</b> → nhập mã đang hiển thị.</p><label class="field">Mã TV<input id="tv-code" inputmode="text" maxlength="12" autocomplete="one-time-code" placeholder="Ví dụ: 1234 5678"></label>${tvLogMarkup()}<p class="tv-note">Cookie được giữ lại nếu kết nối thất bại; hệ thống không hiển thị Cookie ra ngoài.</p><button class="button wide" data-run-tv>Kiểm tra & kết nối</button>`, {onOpen(root) {
+  modal(`<div class="tv-hero"><span>📺</span><div><div class="eyebrow">NETFLIX TV CONNECT</div><h2>Đăng nhập TV an toàn</h2></div></div><p class="modal-lead">Mở Netflix trên TV → chọn <b>Đăng nhập từ trang web</b> → nhập đúng 8 chữ số đang hiển thị.</p><label class="field">Mã TV<input id="tv-code" inputmode="numeric" maxlength="9" autocomplete="one-time-code" placeholder="Ví dụ: 1234 5678"></label>${tvLogMarkup()}<p class="tv-note">Cookie được giữ lại nếu kết nối thất bại; hệ thống không hiển thị Cookie ra ngoài.</p><button class="button wide" data-run-tv>Kiểm tra & kết nối</button>`, {onOpen(root) {
     const button = root.querySelector("[data-run-tv]");
     const input = root.querySelector("#tv-code");
     const renderLog = (items) => { const log = root.querySelector("[data-tv-log]"); if (log) log.outerHTML = tvLogMarkup(items); };
     button.onclick = async (event) => {
-      const code = input.value.trim();
-      if (!code) { input.focus(); toast("Hãy nhập mã TV", "error"); return; }
+      const code = input.value.replace(/[\s-]/g, "");
+      if (!/^\d{8}$/.test(code)) { input.focus(); toast("Mã TV phải gồm đúng 8 chữ số", "error"); return; }
       const done = busyButton(event.currentTarget, "Đang kết nối..."); input.disabled = true;
       let stage = 0;
       const timer = setInterval(() => {
@@ -186,7 +198,7 @@ export function openTvLogin() {
         clearInterval(timer); renderLog(error.payload?.steps || [{key: "connect", label: "Kết nối Netflix TV", status: "error"}]);
         const sheet = root.querySelector(".modal-sheet");
         sheet.querySelector("[data-tv-error]")?.remove();
-        sheet.insertAdjacentHTML("beforeend", `<div class="tv-error" data-tv-error>⚠️ ${escapeHtml(error.message)}</div>`);
+        sheet.insertAdjacentHTML("beforeend", `<div class="tv-error" data-tv-error>⚠️ <b>${escapeHtml(error.reasonCode || "unknown_error")}</b> · ${escapeHtml(error.message)}</div>`);
         input.disabled = false; done();
       }
     };

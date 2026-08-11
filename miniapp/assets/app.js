@@ -1,8 +1,8 @@
-import {api} from "./api.js";
+import {api} from "./api.js?v=10";
 import {state, subscribe, update} from "./state.js";
 import {bottomNav, header, toast} from "./components.js";
-import {accountView, addToCart, claimFreeCookie, homeView, openCart, openDeposit, openGiftcode, openHelp, openNftoken, openOrder, openProduct, openSupport, openTvLogin, ordersView, storeView, toolsView} from "./views.js";
-import {adminView, bindAdminEvents, loadAdmin} from "./admin.js";
+import {accountView, addToCart, claimFreeCookie, homeView, openCart, openDeposit, openGiftcode, openHelp, openNftoken, openOrder, openProduct, openSupport, openTvLogin, ordersView, storeView, toolsView} from "./views.js?v=10";
+import {adminView, bindAdminEvents, loadAdmin} from "./admin.js?v=10";
 
 const tg = window.Telegram?.WebApp;
 const app = document.querySelector("#app");
@@ -13,8 +13,8 @@ let searchTimer;
 if (tg) {
   tg.ready();
   tg.expand();
-  tg.setHeaderColor("#f8fafc");
-  tg.setBackgroundColor("#f8fafc");
+  tg.setHeaderColor("#070707");
+  tg.setBackgroundColor("#070707");
 }
 
 function render() {

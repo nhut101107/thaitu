@@ -732,7 +732,7 @@ def format_account_card(account: dict, link: str, index: int = 0) -> str:
             except Exception: pass
             import html as html_mod
             text = html_mod.unescape(text)
-            return text
+            return repair_mojibake(text)
         if isinstance(value, bool): return 'Có' if value else 'Không'
         if isinstance(value, (int, float)): return str(value)
         if isinstance(value, dict):
@@ -748,7 +748,7 @@ def format_account_card(account: dict, link: str, index: int = 0) -> str:
             return ', '.join(items) if items else 'N/A'
         return 'N/A'
 
-    account_name = normalize_display(account.get('account_name', 'N/A'))
+    account_name = escape_telegram_markdown(repair_mojibake(normalize_display(account.get('account_name', 'N/A'))))
     email_masked = normalize_display(account.get('email_masked', 'N/A'))
     phone = normalize_display(account.get('phone', 'N/A'))
     country = normalize_display(account.get('country', 'N/A'))
@@ -843,6 +843,8 @@ def format_account_card(account: dict, link: str, index: int = 0) -> str:
     )
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+for _quiet_logger in ('httpx', 'httpcore', 'telegram.request'):
+    logging.getLogger(_quiet_logger).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 active_tasks = {}
@@ -1845,34 +1847,164 @@ proxy_manager = ProxyManager()
 
 checker = NetflixTokenChecker()
 
-def process_tv_login(cookie_dict: dict, tv_code: str) -> Tuple[bool, str, dict]:
+
+def repair_mojibake(value):
+    """Repair common UTF-8-as-Latin-1 text without changing normal Unicode names."""
+    if not isinstance(value, str):
+        return value
+    text = value
+    for _ in range(2):
+        if not any(marker in text for marker in ("Ã", "Â", "Ä", "Å", "Æ", "â€", "ðŸ", "á»")):
+            break
+        repaired = None
+        for encoding in ("latin-1", "cp1252"):
+            try:
+                repaired = text.encode(encoding).decode("utf-8")
+                break
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                continue
+        if repaired is None:
+            break
+        if repaired == text:
+            break
+        text = repaired
+    return text
+
+
+def escape_telegram_markdown(value):
+    return str(value).replace("\\", "\\\\").replace("_", "\\_").replace("*", "\\*").replace("[", "\\[")
+
+def process_tv_login(cookie_dict: dict, tv_code: str) -> Tuple[bool, str, str, dict]:
     import os
     import tempfile
     import shutil
+    from urllib.parse import urlsplit
     try:
         from selenium import webdriver
         from selenium.webdriver.common.by import By
-        from selenium.webdriver.chrome.options import Options
-        from selenium.webdriver.chrome.service import Service
+        from selenium.webdriver.chrome.options import Options as ChromeOptions
+        from selenium.webdriver.chrome.service import Service as ChromeService
+        from selenium.webdriver.edge.options import Options as EdgeOptions
+        from selenium.webdriver.edge.service import Service as EdgeService
+        from selenium.common.exceptions import TimeoutException, WebDriverException
         from selenium.webdriver.support.ui import WebDriverWait
         from selenium.webdriver.support import expected_conditions as EC
         from selenium.webdriver.common.keys import Keys
-        from selenium.webdriver.common.action_chains import ActionChains
     except ImportError:
-        return False, "Máy chủ chưa cài thư viện. Chạy lệnh: pip install selenium", {}
+        return False, "dependency_missing", "Máy chủ chưa cài thư viện. Chạy lệnh: pip install selenium", {}
+
+    normalized_code = re.sub(r"[\s-]+", "", str(tv_code or "")).strip()
+    if not (len(normalized_code) == 8 and normalized_code.isdigit()):
+        return False, "invalid_code", "Mã TV phải gồm đúng 8 chữ số", {}
 
     driver = None
     temp_dir = tempfile.mkdtemp()
+    attempt_id = f"tv-{int(time.time() * 1000) % 100000000:08d}"
+
+    def current_path():
+        if not driver:
+            return ""
+        try:
+            return urlsplit(driver.current_url).path.lower()
+        except Exception:
+            return ""
+
+    def is_login_path(path):
+        normalized = (path or "").rstrip("/")
+        return normalized == "/login" or normalized.startswith("/login/")
+
+    def is_success_path(path):
+        normalized = (path or "").lower()
+        return any(
+            marker in normalized
+            for marker in (
+                "/loginlinksuccess",
+                "/tv8/success",
+            )
+        )
+
+    def log_stage(stage, level=logging.INFO):
+        # Never log the TV code, cookies, query string, page body or account data.
+        logger.log(level, "TV login attempt=%s stage=%s path=%s", attempt_id, stage, current_path() or "-")
+
+    def first_interactable(selectors):
+        for selector in selectors:
+            try:
+                for element in driver.find_elements(By.CSS_SELECTOR, selector):
+                    if element.is_displayed() and element.is_enabled():
+                        return element
+            except WebDriverException:
+                continue
+        return False
+
+    def first_visible(selectors):
+        for selector in selectors:
+            try:
+                for element in driver.find_elements(By.CSS_SELECTOR, selector):
+                    if element.is_displayed():
+                        return element
+            except WebDriverException:
+                continue
+        return False
+
+    def enabled_form_button(form_element):
+        if form_element is None:
+            return False
+        try:
+            return next(
+                (
+                    button for button in form_element.find_elements(By.CSS_SELECTOR, "button")
+                    if button.is_displayed() and button.is_enabled()
+                ),
+                False,
+            )
+        except WebDriverException:
+            return False
+
+    input_selectors = (
+        "input[name='rendezvousCode']",  # Current Netflix TV page.
+        "input[data-uia='rendezvous-code-input']",
+        "input[name='code']",
+        "input[name='tvCode']",
+        "input[inputmode='numeric']",
+        "input[type='tel']",
+    )
+    submit_selectors = (
+        "button[data-uia='continue-button']",  # Current Netflix TV page.
+        "button[data-uia='tv8-submit-button']",
+        "button.btn-red",
+    )
 
     try:
-        options = Options()
+        browser_name = "chrome"
+        if os.name == "nt":
+            edge_candidates = [
+                os.path.join(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"), "Microsoft", "Edge", "Application", "msedge.exe"),
+                os.path.join(os.environ.get("PROGRAMFILES", r"C:\Program Files"), "Microsoft", "Edge", "Application", "msedge.exe"),
+            ]
+            browser_path = next((path for path in edge_candidates if os.path.exists(path)), None)
+            if not browser_path:
+                chrome_candidates = [
+                    os.path.join(os.environ.get("PROGRAMFILES", r"C:\Program Files"), "Google", "Chrome", "Application", "chrome.exe"),
+                    os.path.join(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"), "Google", "Chrome", "Application", "chrome.exe"),
+                ]
+                browser_path = next((path for path in chrome_candidates if os.path.exists(path)), None)
+            if not browser_path:
+                return False, "browser_missing", "Windows chưa cài Microsoft Edge hoặc Google Chrome", {}
+            if "\\Microsoft\\Edge\\" in browser_path:
+                browser_name = "edge"
+                options = EdgeOptions()
+            else:
+                options = ChromeOptions()
+            options.binary_location = browser_path
+        else:
+            options = ChromeOptions()
         options.add_argument('--headless=new')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
         options.add_argument('--window-size=1280,720')
         options.add_argument(f'--user-data-dir={temp_dir}')
-        options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36')
-
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option('useAutomationExtension', False)
@@ -1883,91 +2015,267 @@ def process_tv_login(cookie_dict: dict, tv_code: str) -> Tuple[bool, str, dict]:
 
         driver_path = "/data/data/com.termux/files/usr/bin/chromedriver"
 
-        if not os.path.exists(driver_path) or not os.path.exists(bin_path):
-            return False, "Không tìm thấy Chromium. Hãy chạy lệnh: pkg install chromium -y", {}
+        if os.name != "nt" and (not os.path.exists(driver_path) or not os.path.exists(bin_path)):
+            return False, "browser_missing", "Không tìm thấy Chromium. Hãy chạy lệnh: pkg install chromium -y", {}
 
-        options.binary_location = bin_path
-        service = Service(executable_path=driver_path, log_path=os.path.devnull)
-        driver = webdriver.Chrome(service=service, options=options)
+        if os.name != "nt":
+            options.binary_location = bin_path
+            service = ChromeService(executable_path=driver_path, log_path=os.path.devnull)
+            driver = webdriver.Chrome(service=service, options=options)
+        elif browser_name == "edge":
+            edge_driver = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "tools",
+                "msedgedriver.exe",
+            )
+            if not os.path.exists(edge_driver):
+                return False, "webdriver_missing", "Windows chưa cài EdgeDriver tương ứng với Microsoft Edge", {}
+            service = EdgeService(executable_path=edge_driver, log_output=os.path.devnull)
+            driver = webdriver.Edge(service=service, options=options)
+        else:
+            # Selenium Manager resolves the matching ChromeDriver on Windows.
+            driver = webdriver.Chrome(options=options)
 
-        driver.get("https://www.netflix.com/vn-en/")
-        time.sleep(2)
+        driver.set_page_load_timeout(45)
+        try:
+            driver.execute_cdp_cmd(
+                "Page.addScriptToEvaluateOnNewDocument",
+                {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"},
+            )
+        except Exception:
+            pass
+        log_stage("browser_started")
+
+        driver.get("https://www.netflix.com/")
+        WebDriverWait(driver, 20).until(
+            lambda active_driver: active_driver.execute_script("return document.readyState") in ("interactive", "complete")
+        )
+        accepted_cookies = 0
         for key, value in cookie_dict.items():
-            try: driver.add_cookie({'name': key, 'value': value, 'domain': '.netflix.com', 'path': '/'})
-            except: pass
+            if not key or value is None:
+                continue
+            payload = {'name': str(key), 'value': str(value), 'domain': '.netflix.com', 'path': '/'}
+            try:
+                driver.add_cookie(payload)
+                accepted_cookies += 1
+            except WebDriverException:
+                try:
+                    payload['domain'] = 'www.netflix.com'
+                    driver.add_cookie(payload)
+                    accepted_cookies += 1
+                except WebDriverException:
+                    continue
+
+        if accepted_cookies == 0 or not ({"NetflixId", "SecureNetflixId"} & set(cookie_dict)):
+            log_stage("cookie_rejected", logging.WARNING)
+            return False, "cookie_format", "Cookie sai định dạng hoặc thiếu phiên Netflix", {}
+
+        # The TV code page is public, so validate the authenticated session first.
+        driver.get("https://www.netflix.com/YourAccount")
+        WebDriverWait(driver, 20).until(
+            lambda active_driver: active_driver.execute_script("return document.readyState") in ("interactive", "complete")
+        )
+        account_path = current_path()
+        login_controls = driver.find_elements(By.CSS_SELECTOR, "input[name='password'], input[type='password']")
+        if is_login_path(account_path) or login_controls:
+            log_stage("cookie_expired", logging.WARNING)
+            return False, "cookie_expired", "Cookie đã chết hoặc hết hạn", {}
+        log_stage("cookie_validated")
 
         driver.get("https://www.netflix.com/tv8")
-        time.sleep(3)
+        wait = WebDriverWait(driver, 25, poll_frequency=0.4)
+        try:
+            code_input = wait.until(lambda _active_driver: first_interactable(input_selectors))
+        except TimeoutException:
+            if is_login_path(current_path()):
+                log_stage("cookie_expired_on_tv", logging.WARNING)
+                return False, "cookie_expired", "Cookie đã chết hoặc hết hạn", {}
+            log_stage("code_input_missing", logging.WARNING)
+            return False, "selector_changed", f"Netflix chưa hiển thị ô nhập mã (mã lỗi {attempt_id})", {}
 
-        if "login" in driver.current_url.lower():
-            return False, "Cookie đã chết, bị đẩy về trang đăng nhập.", {}
+        code_input.click()
+        code_input.send_keys(Keys.CONTROL, "a")
+        code_input.send_keys(Keys.BACKSPACE)
+        for character in normalized_code:
+            code_input.send_keys(character)
+            time.sleep(0.08)
 
-        wait = WebDriverWait(driver, 15)
+        entered_value = re.sub(r"[\s-]+", "", str(code_input.get_attribute("value") or ""))
+        if entered_value != normalized_code:
+            # Fallback for a React-controlled field only when normal keystrokes did
+            # not update the actual DOM value.
+            driver.execute_script(
+                """
+                const input = arguments[0];
+                const value = arguments[1];
+                const setter = Object.getOwnPropertyDescriptor(
+                    window.HTMLInputElement.prototype, 'value'
+                ).set;
+                setter.call(input, value);
+                input.dispatchEvent(new InputEvent('input', {
+                    bubbles: true, inputType: 'insertText', data: value.slice(-1)
+                }));
+                input.dispatchEvent(new Event('change', {bubbles: true}));
+                """,
+                code_input,
+                normalized_code,
+            )
 
-        code_input = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "input[name='code'], input[name='tvCode'], input[type='tel']")))
-        code_input.clear()
+        form_element = None
+        try:
+            form_element = code_input.find_element(By.XPATH, "./ancestor::form[1]")
+        except WebDriverException:
+            pass
 
-        for char in tv_code:
-            code_input.send_keys(char)
-            time.sleep(0.05)
+        submit_btn = first_visible(submit_selectors)
+        if not submit_btn and form_element is not None:
+            try:
+                submit_btn = next(
+                    (button for button in form_element.find_elements(By.CSS_SELECTOR, "button") if button.is_displayed()),
+                    False,
+                )
+            except WebDriverException:
+                submit_btn = False
 
-        time.sleep(1)
+        if submit_btn and not submit_btn.is_enabled():
+            try:
+                submit_btn = WebDriverWait(driver, 10, poll_frequency=0.25).until(
+                    lambda _active_driver: first_interactable(submit_selectors)
+                    or enabled_form_button(form_element)
+                )
+            except TimeoutException:
+                pass
+
+        submitted = False
+        if submit_btn and submit_btn.is_enabled():
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", submit_btn)
+            try:
+                # WebDriver click behaves like a real user interaction. Netflix may
+                # ignore an untrusted JavaScript click.
+                submit_btn.click()
+            except WebDriverException:
+                driver.execute_script("arguments[0].click();", submit_btn)
+            submitted = True
+        if not submitted:
+            try:
+                code_input.send_keys(Keys.ENTER)
+                submitted = True
+            except WebDriverException:
+                pass
+        if not submitted and form_element is not None:
+            try:
+                driver.execute_script("arguments[0].requestSubmit();", form_element)
+                submitted = True
+            except WebDriverException:
+                pass
+        if not submitted:
+            log_stage("submit_unavailable", logging.WARNING)
+            return False, "submit_failed", f"Netflix không nhận thao tác gửi mã (mã lỗi {attempt_id})", {}
+        log_stage("code_submitted")
+
+        error_markers = (
+            "mã không hợp lệ", "mã không đúng", "mã đã hết hạn",
+            "invalid code", "incorrect code", "code has expired", "code is invalid",
+            "unable to link", "unable to connect", "we were unable", "there was a problem",
+            "nieprawidłowy kod", "kod jest nieprawidłowy", "kod wygasł",
+            "nie udało się", "wystąpił problem",
+        )
+        expired_markers = ("mã đã hết hạn", "code has expired", "kod wygasł", "expired")
+        invalid_markers = ("mã không hợp lệ", "mã không đúng", "invalid code", "incorrect code", "nieprawidłowy kod", "kod jest nieprawidłowy")
+        success_markers = (
+            "thiết bị của bạn đã được kết nối", "tv đã được kết nối", "đã kết nối thành công",
+            "your tv is now connected", "your device is connected",
+            "successfully connected",
+            "telewizor został połączony", "urządzenie zostało połączone",
+        )
+
+        def result_state(active_driver):
+            path = current_path()
+            # `/loginlinksuccess` is Netflix's current successful TV pairing URL;
+            # test success before matching the standalone `/login` route.
+            if is_success_path(path):
+                return "success"
+            if is_login_path(path):
+                return "cookie"
+            try:
+                body = active_driver.find_element(By.TAG_NAME, "body").text.lower()
+            except WebDriverException:
+                body = ""
+            try:
+                code_fields = active_driver.find_elements(By.CSS_SELECTOR, ",".join(input_selectors))
+                if any(str(field.get_attribute("aria-invalid")).lower() == "true" for field in code_fields):
+                    return "netflix_error"
+                error_elements = active_driver.find_elements(
+                    By.CSS_SELECTOR,
+                    "[role='alert'], [aria-live='assertive'], [data-uia*='error'], [class*='error']",
+                )
+                if any(element.is_displayed() and element.text.strip() for element in error_elements):
+                    return "netflix_error"
+            except WebDriverException:
+                pass
+            if any(marker in body for marker in expired_markers):
+                return "expired"
+            if any(marker in body for marker in invalid_markers):
+                return "invalid"
+            if any(marker in body for marker in error_markers):
+                return "netflix_error"
+            if any(marker in body for marker in success_markers):
+                return "success"
+            return False
 
         try:
-            submit_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit'], button[data-uia='tv8-submit-button'], button.btn-red")
-            driver.execute_script("arguments[0].click();", submit_btn)
-        except: pass
+            state = WebDriverWait(driver, 35, poll_frequency=0.5).until(result_state)
+        except TimeoutException:
+            path = current_path()
+            if path in ("/browse", "/profiles") or any(
+                marker in path for marker in ("switchprofile", "profilesgate")
+            ):
+                log_stage("unconfirmed_account_redirect", logging.WARNING)
+                return False, "netflix_unconfirmed", f"Netflix chuyển sang phiên tài khoản nhưng chưa xác nhận ghép TV (mã lỗi {attempt_id})", {}
+            log_stage("confirmation_timeout", logging.WARNING)
+            return False, "netflix_confirmation_timeout", f"Netflix không trả về trạng thái xác nhận (mã lỗi {attempt_id})", {}
 
-        try:
-            submit_btn = driver.find_element(By.CSS_SELECTOR, "button[type='submit'], button.btn-red")
-            ActionChains(driver).move_to_element(submit_btn).click().perform()
-        except: pass
-
-        try:
-            code_input.send_keys(Keys.ENTER)
-        except: pass
-
-        time.sleep(12)
-
-        html = driver.page_source.lower()
-        current_url = driver.current_url.lower()
-
-        is_success = False
-        has_error = any(e in html for e in ['mã không hợp lệ', 'invalid code', 'incorrect code', 'unable to link', 'mã không đúng', 'we were unable'])
-        success_keywords = ['thiết bị của bạn đã được kết nối', 'is connected', 'thành công', 'đã kết nối']
-
-        if any(u in current_url for u in ['tv8/success', '/browse', '/youraccount', 'switchprofile', 'profilesgate']):
-            is_success = True
-        elif any(s in html for s in success_keywords):
-            is_success = True
-        else:
-            inputs = driver.find_elements(By.CSS_SELECTOR, "input[name='code'], input[name='tvCode']")
-            if len(inputs) == 0:
-                is_success = True
-
-        if is_success:
+        if state == "cookie":
+            log_stage("cookie_expired_after_submit", logging.WARNING)
+            return False, "cookie_expired", "Cookie đã chết hoặc hết hạn", {}
+        if state == "expired":
+            log_stage("code_expired", logging.WARNING)
+            return False, "tv_code_expired", "Netflix xác nhận mã TV đã hết hạn", {}
+        if state == "invalid":
+            log_stage("code_invalid", logging.WARNING)
+            return False, "tv_code_invalid", "Netflix xác nhận mã TV không hợp lệ", {}
+        if state == "netflix_error":
+            log_stage("netflix_error", logging.WARNING)
+            return False, "netflix_error", "Netflix trả về lỗi khi kết nối mã TV", {}
+        if state == "success":
+            log_stage("connected", logging.WARNING)
             current_cookies = {ck['name']: ck['value'] for ck in driver.get_cookies()}
             account_info = checker.get_account_info(current_cookies)
-            return True, "Thành công", account_info
-        else:
-            try:
-                body_text = driver.find_element(By.TAG_NAME, "body").text.replace('\n', ' ')[:100]
-            except:
-                body_text = "Không đọc được chữ trên web"
+            return True, "connected", "Thành công", account_info
 
-            if has_error:
-                return False, f"Mã sai hoặc hết hạn. Web báo: {body_text}", {}
-            else:
-                return False, f"Lỗi không bấm được nút gửi mã. Web báo: {body_text}", {}
-
-    except Exception as e:
-        return False, f"Lỗi hệ thống khi mở trình duyệt: {str(e)[:50]}", {}
+        log_stage("unknown_result", logging.WARNING)
+        return False, "netflix_unknown", f"Netflix trả về trạng thái chưa xác định (mã lỗi {attempt_id})", {}
+    except TimeoutException:
+        log_stage("page_timeout", logging.WARNING)
+        return False, "network_timeout", f"Netflix phản hồi quá chậm (mã lỗi {attempt_id})", {}
+    except WebDriverException as error:
+        # Log only the exception type; Selenium messages can contain request URLs.
+        logger.error("TV login attempt=%s stage=webdriver_error type=%s", attempt_id, type(error).__name__)
+        return False, "webdriver_error", f"Trình duyệt/EdgeDriver gặp lỗi (mã lỗi {attempt_id})", {}
+    except Exception as error:
+        # Log only the exception type; Selenium messages can contain request URLs.
+        logger.error("TV login attempt=%s stage=system_error type=%s", attempt_id, type(error).__name__)
+        return False, "browser_error", f"Không thể mở phiên Netflix (mã lỗi {attempt_id})", {}
     finally:
         if driver:
-            try: driver.quit()
-            except: pass
-        try: shutil.rmtree(temp_dir, ignore_errors=True)
-        except: pass
+            try:
+                driver.quit()
+            except Exception:
+                pass
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 def kb_main():
     rows = []
@@ -2721,41 +3029,57 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if awaiting == 'tv_code':
         tv_code = text.strip().replace(" ", "").replace("-", "")
-        if len(tv_code) < 4:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Mã TV không hợp lệ. Vui lòng kiểm tra và nhập lại (ví dụ: 12345678).")
+        if not (len(tv_code) == 8 and tv_code.isdigit()):
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Mã TV phải gồm đúng 8 chữ số (ví dụ: 12345678).")
             return
 
         status_msg = await context.bot.send_message(chat_id=update.effective_chat.id, text="⏳ *Đang kết nối vào hệ thống để đăng nhập TV...*", parse_mode='Markdown')
 
-        cookies = pop_premium_cookies(1, user_id)
-        if not cookies:
-             await status_msg.edit_text("❌ Rất tiếc, kho hiện tại đã hết cookie! Vui lòng thử lại sau.", reply_markup=kb_main())
-             context.user_data['awaiting'] = None
-             return
+        error_msg = "Kho Cookie Premium đang trống"
+        error_reason = "cookie_unavailable"
+        held_cookie_ids = []
+        for _attempt in range(3):
+            cookies = pop_premium_cookies(1, user_id)
+            if not cookies:
+                break
 
-        c_id, c_data = cookies[0]
-        c_dict_list = checker.extract_cookies_from_text(c_data)
+            c_id, c_data = cookies[0]
+            held_cookie_ids.append(c_id)
+            c_dict_list = checker.extract_cookies_from_text(c_data)
+            if not c_dict_list:
+                error_msg = "Cookie trong kho sai định dạng"
+                error_reason = "cookie_format"
+                continue
 
-        if not c_dict_list:
-             delete_premium_cookie(c_id)
-             await status_msg.edit_text("❌ Cookie lấy ra bị lỗi định dạng, vui lòng gõ lại mã để lấy cookie khác.", reply_markup=kb_main())
-             return
+            success, error_reason, error_msg, account_info = await asyncio.to_thread(
+                process_tv_login, c_dict_list[0], tv_code
+            )
+            dead_cookie = error_reason in ("cookie_expired", "cookie_format")
 
-        cookie_dict = c_dict_list[0]
+            if success:
+                for held_id in held_cookie_ids:
+                    return_premium_cookie(held_id)
+                card = format_account_card(account_info, "Đăng nhập trực tiếp trên TV thành công!")
+                await status_msg.edit_text(
+                    f"🎉 *ĐĂNG NHẬP TV THÀNH CÔNG!*\n\nTV của bạn đã được kết nối với tài khoản dưới đây:\n\n{card}",
+                    parse_mode='Markdown',
+                    reply_markup=kb_done_with_report(),
+                )
+                context.user_data['awaiting'] = None
+                return
 
-        success, error_msg, account_info = await asyncio.to_thread(process_tv_login, cookie_dict, tv_code)
+            if dead_cookie:
+                continue
 
-        if success:
-            return_premium_cookie(c_id)
-            card = format_account_card(account_info, "Đăng nhập trực tiếp trên TV thành công!")
-            await status_msg.edit_text(f"🎉 *ĐĂNG NHẬP TV THÀNH CÔNG!*\n\nTV của bạn đã được kết nối với tài khoản dưới đây:\n\n{card}", parse_mode='Markdown', reply_markup=kb_done_with_report())
-        else:
-            if "Cookie đã chết" in error_msg:
-                delete_premium_cookie(c_id)
-            else:
-                return_premium_cookie(c_id)
+            break
 
-            await status_msg.edit_text(f"❌ *ĐĂNG NHẬP TV THẤT BẠI!*\n\nLý do: `{error_msg}`\n\nVui lòng kiểm tra lại mã hoặc bấm nút *Đăng Nhập TV* lại để lấy cookie khác (Mã TV chỉ có hiệu lực trong 5 phút).", parse_mode='Markdown', reply_markup=kb_main())
+        for held_id in held_cookie_ids:
+            return_premium_cookie(held_id)
+        await status_msg.edit_text(
+            f"❌ *ĐĂNG NHẬP TV THẤT BẠI!*\n\nMã lỗi: `{error_reason}`\nLý do: `{error_msg}`\n\nHãy kiểm tra lại trạng thái Netflix hoặc thử lại sau.",
+            parse_mode='Markdown',
+            reply_markup=kb_main(),
+        )
         context.user_data['awaiting'] = None
         return
 

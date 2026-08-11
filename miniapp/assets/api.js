@@ -5,19 +5,25 @@ export class ApiError extends Error {
     super(message);
     this.status = status;
     this.payload = payload;
+    this.reasonCode = payload.reason_code || "unknown_error";
   }
 }
 
 async function request(path, options = {}) {
   const isForm = options.body instanceof FormData;
-  const response = await fetch(path, {
-    ...options,
-    headers: {
-      ...(isForm ? {} : {"Content-Type": "application/json"}),
-      "X-Telegram-Init-Data": tg?.initData || "",
-      ...(options.headers || {}),
-    },
-  });
+  let response;
+  try {
+    response = await fetch(path, {
+      ...options,
+      headers: {
+        ...(isForm ? {} : {"Content-Type": "application/json"}),
+        "X-Telegram-Init-Data": tg?.initData || "",
+        ...(options.headers || {}),
+      },
+    });
+  } catch (_error) {
+    throw new ApiError("Không thể kết nối máy chủ", 0, {reason_code: "network_error"});
+  }
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || !payload.ok) {
     throw new ApiError(payload.error || "Không thể kết nối máy chủ", response.status, payload);
@@ -47,6 +53,7 @@ export const api = {
   adminDashboard: (q = "") => request(`/api/admin/dashboard?${new URLSearchParams({q})}`),
   adminCreateProduct: (value) => request("/api/admin/products", {method: "POST", body: JSON.stringify(value)}),
   adminUpdateProduct: (id, value) => request(`/api/admin/products/${id}`, {method: "PUT", body: JSON.stringify(value)}),
+  adminDeleteProduct: (id) => request(`/api/admin/products/${id}`, {method: "DELETE", body: "{}"}),
   adminSavePlan: (name, value) => request(`/api/admin/plans/${encodeURIComponent(name)}`, {method: "PUT", body: JSON.stringify(value)}),
   adminUpdateUser: (id, value) => request(`/api/admin/users/${id}`, {method: "PUT", body: JSON.stringify(value)}),
   adminUpdateTransaction: (id, status, note = "") => request(`/api/admin/transactions/${id}`, {method: "PUT", body: JSON.stringify({status, note})}),

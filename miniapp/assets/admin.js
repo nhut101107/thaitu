@@ -1,11 +1,12 @@
-import {api} from "./api.js";
+import {api} from "./api.js?v=10";
 import {state, update} from "./state.js";
-import {emptyState, escapeHtml, formatMoney, modal, skeleton, toast} from "./components.js";
+import {emptyState, escapeHtml, formatMoney, modal, skeleton, toast} from "./components.js?v=10";
 
 export async function loadAdmin(query = "") {
   try {
     const admin = await api.adminDashboard(query);
-    update({admin});
+    const categories = [...new Set((admin.products || []).map((item) => item.category).filter(Boolean))];
+    update({admin, products: admin.products || [], categories});
   } catch (error) {
     toast(error.message, "error");
   }
@@ -20,6 +21,12 @@ function busyButton(button, text) {
   button.disabled = true;
   button.textContent = text;
   return () => { button.disabled = false; button.textContent = old; };
+}
+
+function productThumb(item) {
+  const fallback = `<div class="auto-product-art" ${item.imageUrl ? "hidden" : ""}><span>${escapeHtml((item.name || "N").slice(0, 1).toUpperCase())}</span><b>N</b></div>`;
+  const image = item.imageUrl ? `<img data-admin-product-image src="${escapeHtml(item.imageUrl)}" alt="">` : "";
+  return `<div class="admin-product-row-art"><div class="product-image">${image}${fallback}</div></div>`;
 }
 
 export function adminView() {
@@ -43,7 +50,7 @@ export function adminView() {
 
     <details class="admin-section"><summary><span><i>📦</i><b>Quản lý kho Cookie</b><small>Premium ${s.premiumStock} · Free ${s.freeStock}</small></span><em>⌄</em></summary><div class="admin-section-body"><div class="inventory-cards"><article><b>Premium</b><small>${s.premiumStock} khả dụng · ${s.premiumUsed} đã dùng</small><button data-admin-inventory="premium">Thêm vào kho</button><button class="clean" data-admin-cleanup="premium">Dọn mục đã dùng</button></article><article><b>Free</b><small>${s.freeStock} khả dụng · ${s.freeUsed} đã dùng</small><button data-admin-inventory="free">Thêm vào kho</button><button class="clean" data-admin-cleanup="free">Dọn mục đã dùng</button></article></div><p class="admin-note">Dữ liệu Cookie chỉ được ghi vào SQLite, không có API đọc ngược nội dung ra giao diện.</p></div></details>
 
-    <details class="admin-section" open><summary><span><i>🛍</i><b>Sản phẩm cửa hàng</b><small>${data.products.length} sản phẩm</small></span><em>⌄</em></summary><div class="admin-section-body"><button class="button admin-add" data-admin-product-new>＋ Thêm sản phẩm</button>${adminRows(data.products, (item) => `<article class="admin-row"><div><b>${escapeHtml(item.name)}</b><small>${formatMoney(item.price)} · ⚡ ${item.nftokenCredits || 0} lượt NFToken · 🍪 ${item.credits} lượt Cookie VIP · ${item.available ? "Đang bán" : "Đã ẩn"}</small></div><button data-admin-product="${item.id}">Sửa</button></article>`, "Hãy tạo sản phẩm đầu tiên.")}</div></details>
+    <details class="admin-section" open><summary><span><i>🛍</i><b>Sản phẩm cửa hàng</b><small>${data.products.length} sản phẩm</small></span><em>⌄</em></summary><div class="admin-section-body"><button class="button admin-add" data-admin-product-new>＋ Thêm sản phẩm</button>${adminRows(data.products, (item) => `<article class="admin-row admin-product-item">${productThumb(item)}<div class="admin-product-info"><b>${escapeHtml(item.name)}</b><small>${formatMoney(item.price)} · ⚡ ${item.nftokenCredits || 0} lượt NFToken · 🍪 ${item.credits} lượt Cookie VIP · ${item.available ? "Đang bán" : "Đã ẩn"}</small></div><span><button data-admin-product="${item.id}">Sửa</button><button class="delete-product" data-admin-product-delete="${item.id}">Xóa</button></span></article>`, "Hãy tạo sản phẩm đầu tiên.")}</div></details>
 
     <details class="admin-section"><summary><span><i>⚡</i><b>Gói & hạn mức chức năng</b><small>NFToken và Cookie miễn phí mỗi ngày</small></span><em>⌄</em></summary><div class="admin-section-body"><button class="button admin-add" data-admin-plan-new>＋ Tạo gói hạn mức</button>${adminRows(data.plans, (plan) => `<article class="admin-row"><div><b>${escapeHtml(plan.name)}</b><small>${plan.tokens_max} NFToken/ngày · ${plan.cookies_max} Cookie/ngày</small></div><button data-admin-plan="${escapeHtml(plan.name)}">Sửa</button></article>`, "Chưa có gói hạn mức.")}</div></details>
 
@@ -75,7 +82,7 @@ function productDialog(item = null) {
       root.querySelector("[data-product-form]").onsubmit = async (event) => {
         event.preventDefault(); const form = new FormData(event.currentTarget);
         const value = {name: form.get("name"), price: Number(form.get("price")), nftokenCredits: Number(form.get("nftokenCredits")), credits: Number(form.get("credits")), category: form.get("category"), description: form.get("description"), imageUrl: form.get("imageUrl"), warrantyDays: Number(form.get("warrantyDays")), featured: form.has("featured"), active: form.has("active")};
-        try { item ? await api.adminUpdateProduct(item.id, value) : await api.adminCreateProduct(value); close(); await loadAdmin(); toast("Đã lưu sản phẩm"); } catch (error) { toast(error.message, "error"); }
+        try { item ? await api.adminUpdateProduct(item.id, value) : await api.adminCreateProduct(value); close(); await loadAdmin(); toast("Đã lưu sản phẩm"); } catch (error) { toast(`${error.message}${error.reasonCode && error.reasonCode !== "unknown_error" ? ` [${error.reasonCode}]` : ""}`, "error"); }
       };
     }});
 }
@@ -172,6 +179,15 @@ export function bindAdminEvents() {
   document.querySelector("[data-admin-reload]")?.addEventListener("click", () => loadAdmin());
   document.querySelector("[data-admin-product-new]")?.addEventListener("click", () => productDialog());
   document.querySelectorAll("[data-admin-product]").forEach((button) => button.onclick = () => productDialog(state.admin.products.find((item) => item.id === Number(button.dataset.adminProduct))));
+  document.querySelectorAll("[data-admin-product-image]").forEach((image) => image.addEventListener("error", () => { image.hidden = true; image.nextElementSibling.hidden = false; }));
+  document.querySelectorAll("[data-admin-product-delete]").forEach((button) => button.onclick = async () => {
+    const item = state.admin.products.find((product) => product.id === Number(button.dataset.adminProductDelete));
+    if (!item || !confirm(`Xóa sản phẩm “${item.name}”? Sản phẩm đã có đơn sẽ được ẩn để giữ lịch sử.`)) return;
+    const restore = busyButton(button, "...");
+    try { const result = await api.adminDeleteProduct(item.id); await loadAdmin(); toast(result.archived ? result.message : "Đã xóa sản phẩm"); }
+    catch (error) { toast(`${error.message}${error.reasonCode && error.reasonCode !== "unknown_error" ? ` [${error.reasonCode}]` : ""}`, "error"); }
+    finally { restore(); }
+  });
   document.querySelector("[data-admin-plan-new]")?.addEventListener("click", () => planDialog());
   document.querySelectorAll("[data-admin-plan]").forEach((button) => button.onclick = () => planDialog(state.admin.plans.find((plan) => plan.name === button.dataset.adminPlan)));
   document.querySelectorAll("[data-admin-user]").forEach((button) => button.onclick = () => userDialog(state.admin.users.find((user) => user.user_id === Number(button.dataset.adminUser))));
