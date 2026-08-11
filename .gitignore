@@ -6,3 +6,5 @@ tokenbot.txt
 bot_database.db
 bot_database.db-shm
 bot_database.db-wal
+logs/
+*.log
