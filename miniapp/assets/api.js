@@ -26,6 +26,7 @@ async function request(path, options = {}) {
 }
 
 export const api = {
+  request,
   bootstrap: () => request("/api/bootstrap"),
   products: (params = {}) => request(`/api/products?${new URLSearchParams(params)}`),
   product: (id) => request(`/api/products/${id}`),
