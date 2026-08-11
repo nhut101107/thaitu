@@ -1,4 +1,5 @@
 import {state} from "./state.js";
+import {translateDom} from "./i18n.js";
 
 const money = new Intl.NumberFormat("vi-VN");
 export const formatMoney = (value) => `${money.format(Number(value || 0))} ₫`;
@@ -69,5 +70,25 @@ export function modal(content, options = {}) {
   root.querySelectorAll("[data-close-modal]").forEach((el) => el.addEventListener("click", (event) => { if (event.target === el) close(); }));
   window.Telegram?.WebApp?.BackButton?.onClick(close);
   options.onOpen?.(root, close);
+  translateDom(root);
   return close;
+}
+
+export async function copyText(value) {
+  const text = String(value ?? "");
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    toast("Đã sao chép");
+    return;
+  }
+  const input = document.createElement("textarea");
+  input.value = text;
+  input.setAttribute("readonly", "");
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.appendChild(input);
+  input.select();
+  document.execCommand("copy");
+  input.remove();
+  toast("Đã sao chép");
 }

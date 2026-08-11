@@ -1,5 +1,9 @@
 const tg = window.Telegram?.WebApp;
 
+function storedPwaSession() {
+  try { return localStorage.getItem("shop_mmo_pwa_session") || ""; } catch { return ""; }
+}
+
 export class ApiError extends Error {
   constructor(message, status, payload = {}) {
     super(message);
@@ -29,6 +33,7 @@ async function request(path, options = {}) {
       headers: {
         ...(isForm ? {} : {"Content-Type": "application/json"}),
         "X-Telegram-Init-Data": tg?.initData || "",
+        "X-PWA-Session": storedPwaSession(),
         ...(options.headers || {}),
       },
     });
@@ -88,6 +93,7 @@ export const api = {
   markNotificationsRead: (ids = [], all = false) => request("/api/notifications/read", {method: "POST", body: JSON.stringify({ids, all})}),
   getLanguage: () => request("/api/preferences/language"),
   setLanguage: (language) => request("/api/preferences/language", {method: "PUT", body: JSON.stringify({language})}),
+  pwaSession: () => request("/api/pwa/session", {method: "POST", body: "{}"}),
   adminDashboard: (q = "") => request(`/api/admin/dashboard?${new URLSearchParams({q})}`),
   adminCreateProduct: (value) => request("/api/admin/products", {method: "POST", body: JSON.stringify(value)}),
   adminUpdateProduct: (id, value) => request(`/api/admin/products/${id}`, {method: "PUT", body: JSON.stringify(value)}),

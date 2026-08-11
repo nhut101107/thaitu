@@ -37,6 +37,10 @@ AUTH_MAX_AGE = int(os.getenv("MINIAPP_AUTH_MAX_AGE", "3600"))
 PAGE_SIZE = 20
 TV_LOGIN_RUNTIME_VERSION = "tv-login-runtime-r10"
 DOWNLOAD_SECRET = os.getenv("MINIAPP_DOWNLOAD_SECRET") or os.getenv("TELEGRAM_BOT_TOKEN", "nftoken-download-secret")
+try:
+    PWA_SESSION_MAX_AGE = max(900, min(int(os.getenv("MINIAPP_PWA_SESSION_MAX_AGE", "604800")), 2592000))
+except (TypeError, ValueError):
+    PWA_SESSION_MAX_AGE = 604800
 
 
 def source_fingerprint():
@@ -712,12 +716,39 @@ def validate_init_data(raw):
     return user
 
 
+def issue_pwa_session(user_id):
+    expires_at = int(time.time()) + PWA_SESSION_MAX_AGE
+    payload = f"{int(user_id)}.{expires_at}"
+    signature = hmac.new(DOWNLOAD_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return f"{payload}.{signature}", expires_at
+
+
+def validate_pwa_session(raw):
+    value = str(raw or "").strip().split(".")
+    if len(value) != 3:
+        raise ValueError("Phiên PWA không hợp lệ")
+    user_id, expires_at, signature = value
+    payload = f"{user_id}.{expires_at}"
+    expected = hmac.new(DOWNLOAD_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        raise ValueError("Phiên PWA không hợp lệ")
+    try:
+        user_id = int(user_id)
+        expires_at = int(expires_at)
+    except ValueError as error:
+        raise ValueError("Phiên PWA không hợp lệ") from error
+    if user_id <= 0 or expires_at < int(time.time()):
+        raise ValueError("Phiên PWA đã hết hạn")
+    return {"id": user_id, "first_name": "Bạn", "_pwa_session": True}
+
+
 def authenticated(handler):
     @wraps(handler)
     def wrapped(*args, **kwargs):
         try:
-            g.telegram_user = validate_init_data(
-                request.headers.get("X-Telegram-Init-Data", "")
+            init_data = request.headers.get("X-Telegram-Init-Data", "")
+            g.telegram_user = validate_init_data(init_data) if init_data else validate_pwa_session(
+                request.headers.get("X-PWA-Session", "")
             )
         except ValueError as error:
             return jsonify({"ok": False, "error": str(error)}), 401
@@ -1564,7 +1595,7 @@ def bootstrap():
 
 
 def quota_payload(connection, user_id):
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = local_today()
     user = connection.execute(
         "SELECT plan_name,credits,nftoken_credits FROM users WHERE user_id=?", (user_id,)
     ).fetchone()
@@ -1930,9 +1961,9 @@ def free_cookie():
     try:
         require_feature(connection, "freeCookie")
     except ToolError as error:
-        return jsonify({"ok": False, "error": str(error)}), error.status
+        return jsonify({"ok": False, "reason_code": "feature_disabled", "error": str(error)}), error.status
     if tool_rate_limited(user_id):
-        return jsonify({"ok": False, "error": "Bạn thao tác quá nhanh", "steps": [{"key": "validate", "label": "Kiểm tra mã TV", "status": "error"}]}), 429
+        return jsonify({"ok": False, "reason_code": "rate_limited", "error": "Bạn thao tác quá nhanh", "steps": [{"key": "validate", "label": "Kiểm tra mã TV", "status": "error"}]}), 429
     today = local_today()
     try:
         connection.execute("BEGIN IMMEDIATE")
@@ -1961,14 +1992,14 @@ def free_cookie():
         ).fetchone()[0]
         if usage >= cookies_max:
             connection.rollback()
-            return jsonify({"ok": False, "error": "Bạn đã hết lượt Cookie miễn phí hôm nay"}), 409
+            return jsonify({"ok": False, "reason_code": "quota_exhausted", "error": "Bạn đã hết lượt Cookie miễn phí hôm nay"}), 409
         cookie = connection.execute(
             "SELECT id,data FROM free_cookies WHERE is_used=0 ORDER BY id LIMIT 1"
         ).fetchone()
         if not cookie:
             connection.rollback()
-            return jsonify({"ok": False, "error": "Kho Cookie miễn phí đang trống"}), 409
-        connection.execute("UPDATE free_cookies SET is_used=0 WHERE id=?", (cookie["id"],))
+            return jsonify({"ok": False, "reason_code": "stock_empty", "error": "Kho Cookie miễn phí đang trống"}), 409
+        connection.execute("UPDATE free_cookies SET is_used=1 WHERE id=? AND is_used=0", (cookie["id"],))
         if checkin_row:
             connection.execute("UPDATE free_cookie_checkins SET claimed=claimed-1 WHERE user_id=? AND local_date=? AND claimed>0", (user_id, today))
         else:
@@ -1987,7 +2018,7 @@ def free_cookie():
     except Exception:
         connection.rollback()
         app.logger.exception("Free cookie failed for user_id=%s", user_id)
-        return jsonify({"ok": False, "error": "Không thể nhận Cookie lúc này"}), 500
+        return jsonify({"ok": False, "reason_code": "cookie_delivery_error", "error": "Không thể nhận Cookie lúc này"}), 500
 
 
 def generate_one_nftoken(connection, user_id, mode, deadline=None, request_id=None):
@@ -3437,6 +3468,15 @@ def get_language():
     user_id = int(g.telegram_user["id"])
     row = db().execute("SELECT language FROM user_preferences WHERE user_id=?", (user_id,)).fetchone()
     return jsonify({"ok": True, "language": normalize_language(row[0] if row else g.telegram_user.get("language_code", "vi")), "supported": ["vi", "en"]})
+
+
+@app.post("/api/pwa/session")
+@authenticated
+def pwa_session():
+    if g.telegram_user.get("_pwa_session"):
+        return jsonify({"ok": False, "error": "Chỉ Telegram mới có thể cấp phiên PWA"}), 403
+    token, expires_at = issue_pwa_session(int(g.telegram_user["id"]))
+    return jsonify({"ok": True, "token": token, "expiresAt": expires_at})
 
 
 @app.put("/api/preferences/language")

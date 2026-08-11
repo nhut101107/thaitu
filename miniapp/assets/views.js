@@ -1,6 +1,6 @@
-import {api} from "./api.js?v=14";
+import {api} from "./api.js?v=15";
 import {state, update} from "./state.js";
-import {emptyState, escapeHtml, formatMoney, icon, modal, productCard, skeleton, toast} from "./components.js?v=14";
+import {copyText, emptyState, escapeHtml, formatMoney, icon, modal, productCard, skeleton, toast} from "./components.js?v=15";
 
 function section(title, body, action = "") {
   return `<section class="content-section"><div class="section-title"><div><small>Shop MMO</small><h2>${title}</h2></div>${action}</div>${body}</section>`;
@@ -153,7 +153,7 @@ export function openNftoken(mode = "plan") {
       let failed = false;
       try {
         const result = await api.nftoken(mode, quantity, requestId); syncQuota(result.quota); close();
-        modal(`<div class="confirm-icon">✓</div><h2>Tạo thành công ${result.items.length} NFToken</h2>${result.items.map((item, index) => `<article class="token-result"><b>Tài khoản ${index + 1}</b>${accountSummary(item.account)}<a class="button wide" href="${escapeHtml(item.link)}" target="_blank" rel="noopener">Mở Netflix</a>${item.downloadUrl ? `<a class="button secondary wide" href="${escapeHtml(item.downloadUrl)}">Tải file NFToken bảo mật</a>` : ""}<button class="button secondary wide" data-copy-link="${escapeHtml(item.link)}">Sao chép link</button></article>`).join("")}`, {onOpen(resultRoot) { resultRoot.querySelectorAll("[data-copy-link]").forEach((button) => button.onclick = () => navigator.clipboard.writeText(button.dataset.copyLink).then(() => toast("Đã sao chép link"))); }});
+        modal(`<div class="confirm-icon">✓</div><h2>Tạo thành công ${result.items.length} NFToken</h2>${result.items.map((item, index) => `<article class="token-result"><b>Tài khoản ${index + 1}</b>${accountSummary(item.account)}<a class="button wide" href="${escapeHtml(item.link)}" target="_blank" rel="noopener">Mở Netflix</a>${item.downloadUrl ? `<a class="button secondary wide" href="${escapeHtml(item.downloadUrl)}">Tải file NFToken bảo mật</a>` : ""}<button class="button secondary wide" data-copy-link="${escapeHtml(item.link)}">Sao chép link</button></article>`).join("")}`, {onOpen(resultRoot) { resultRoot.querySelectorAll("[data-copy-link]").forEach((button) => button.onclick = () => copyText(button.dataset.copyLink)); }});
       } catch (error) {
         failed = true;
         const message = error.reasonCode === "nftoken_timeout"
@@ -172,7 +172,7 @@ export function claimFreeCookie() {
   modal(`<div class="confirm-icon">🎁</div><h2>Cookie miễn phí</h2><p>Cookie được lấy theo đúng hạn mức gói của bạn.</p><button class="button wide" data-claim-free>Nhận Cookie ngay</button>`, {onOpen(root, close) {
     root.querySelector("[data-claim-free]").onclick = async (event) => {
       const done = busyButton(event.currentTarget);
-      try { const result = await api.freeCookie(); syncQuota(result.quota); close(); modal(`<div class="confirm-icon">✓</div><h2>Cookie của bạn</h2><p class="privacy-banner">${escapeHtml(result.copyright?.text || "© mnhut - NFToken Pro")}</p><textarea class="result-text" readonly>${escapeHtml(result.cookie)}</textarea>${result.downloadUrl ? `<a class="button wide" href="${escapeHtml(result.downloadUrl)}">Tải Cookie bảo mật</a>` : ""}<button class="button secondary wide" data-copy-cookie>Sao chép Cookie</button>`, {onOpen(resultRoot) { resultRoot.querySelector("[data-copy-cookie]").onclick = () => navigator.clipboard.writeText(result.cookie).then(() => toast("Đã sao chép Cookie")); }}); }
+      try { const result = await api.freeCookie(); syncQuota(result.quota); state.bootstrap.checkin = result.checkin || state.bootstrap.checkin; close(); modal(`<div class="confirm-icon">✓</div><h2>Cookie của bạn</h2><p class="privacy-banner">${escapeHtml(result.copyright?.text || "© mnhut - NFToken Pro")}</p><textarea class="result-text" readonly>${escapeHtml(result.cookie || "")}</textarea>${result.downloadUrl ? `<a class="button wide" href="${escapeHtml(result.downloadUrl)}">Tải Cookie bảo mật</a>` : ""}<button class="button secondary wide" data-copy-cookie>Sao chép Cookie</button>`, {onOpen(resultRoot) { resultRoot.querySelector("[data-copy-cookie]").onclick = () => copyText(result.cookie || ""); }}); }
       catch (error) { toast(error.message, "error"); done(); }
     };
   }});
@@ -228,7 +228,7 @@ export function openCheckin() {
 
 export function openReferral() {
   const referral = state.bootstrap.referral || {};
-  modal(`<div class="confirm-icon">🔗</div><h2>Giới thiệu bạn bè</h2><p>Đã có ${referral.count || 0}/5 người hợp lệ. Đủ 5 người sẽ nhận đúng 2 lượt NFToken.</p><label class="field">Link giới thiệu<input readonly value="${escapeHtml(referral.link || "")}"></label><button class="button wide" data-copy-referral>Sao chép link</button>`, {onOpen(root) { root.querySelector("[data-copy-referral]").onclick = () => navigator.clipboard.writeText(referral.link || "").then(() => toast("Đã sao chép link")); }});
+  modal(`<div class="confirm-icon">🔗</div><h2>Giới thiệu bạn bè</h2><p>Đã có ${referral.count || 0}/5 người hợp lệ. Đủ 5 người sẽ nhận đúng 2 lượt NFToken.</p><label class="field">Link giới thiệu<input readonly value="${escapeHtml(referral.link || "")}"></label><button class="button wide" data-copy-referral>Sao chép link</button>`, {onOpen(root) { root.querySelector("[data-copy-referral]").onclick = () => copyText(referral.link || ""); }});
 }
 
 export async function openNotifications() {
@@ -274,7 +274,7 @@ function depositRows(items) {
 async function showDepositPayment(result, closeWallet) {
   closeWallet?.();
   modal(`<div class="deposit-head"><span>💳</span><div><div class="eyebrow">GIAO DỊCH #${result.transactionId}</div><h2>Quét QR để chuyển khoản</h2></div></div><div class="deposit-amount"><small>SỐ TIỀN CẦN CHUYỂN</small><strong>${formatMoney(result.amount)}</strong></div>${result.qrUrl ? `<div class="deposit-qr-wrap"><img class="deposit-qr" src="${escapeHtml(result.qrUrl)}" alt="QR chuyển khoản"><small>Quét bằng ứng dụng ngân hàng</small></div>` : '<div class="privacy-banner">Admin chưa cấu hình QR ngân hàng. Hãy chuyển khoản với nội dung bên dưới.</div>'}<p class="deposit-label">Nội dung chuyển khoản</p><div class="copy-value"><code>${escapeHtml(result.transferNote)}</code><button data-copy-note>${icon("copy")}</button></div><div class="deposit-warning">Chuyển đúng số tiền và nội dung để Admin đối soát nhanh.</div><button class="button wide deposit-paid" data-submit-deposit>✓ Tôi đã chuyển tiền</button><button class="button secondary wide" data-later-deposit>Để sau</button>`, {onOpen(root, close) {
-    root.querySelector("[data-copy-note]").onclick = () => navigator.clipboard.writeText(result.transferNote).then(() => toast("Đã sao chép nội dung"));
+    root.querySelector("[data-copy-note]").onclick = () => copyText(result.transferNote);
     root.querySelector("[data-later-deposit]").onclick = () => { close(); openDeposit(); };
     root.querySelector("[data-submit-deposit]").onclick = async (event) => {
       const done = busyButton(event.currentTarget, "Đang báo Admin...");

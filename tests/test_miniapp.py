@@ -66,6 +66,16 @@ class MiniAppTest(unittest.TestCase):
         self.assertEqual(self.client.get("/api/bootstrap").status_code, 401)
         self.assertEqual(self.client.get("/api/bootstrap", headers={"X-Telegram-Init-Data": signed_init_data(1) + "x"}).status_code, 401)
 
+    def test_pwa_session_can_reopen_authenticated_app_without_telegram_init_data(self):
+        issued = self.client.post("/api/pwa/session", json={}, headers=self.headers)
+        self.assertEqual(issued.status_code, 200)
+        token = issued.json["token"]
+        self.assertNotIn(TOKEN, token)
+        reopened = self.client.get("/api/bootstrap", headers={"X-PWA-Session": token})
+        self.assertEqual(reopened.status_code, 200)
+        self.assertEqual(reopened.json["user"]["id"], 1)
+        self.assertEqual(self.client.get("/api/bootstrap", headers={"X-PWA-Session": token + "x"}).status_code, 401)
+
     def test_bootstrap_uses_shop_mmo_customer_brand(self):
         response = self.client.get("/api/bootstrap", headers=self.headers)
         self.assertEqual(response.status_code, 200)
@@ -97,19 +107,38 @@ class MiniAppTest(unittest.TestCase):
         self.assertLessEqual(check.call_args.kwargs["request_timeout"], 2)
         self.assertGreater(check.call_args.kwargs["deadline"], time.monotonic() - 2.1)
 
-    def test_checker_network_error_fails_fast_without_cookie_logging(self):
+    def test_checker_network_error_tries_each_official_endpoint_without_cookie_logging(self):
         checker = code_goc.NetflixTokenChecker()
         session = Mock()
         session.post.side_effect = requests.exceptions.ConnectionError("blocked upstream")
-        with patch.object(checker, "_create_session", return_value=session) as create_session:
+        with patch.object(checker, "_create_session", return_value=session) as create_session, patch(
+            "code_goc.time.sleep"
+        ):
             result = checker.check_cookie(
                 {"NetflixId": "safe"}, request_timeout=1, max_retries=0,
-                deadline=time.monotonic() + 1,
+                deadline=time.monotonic() + 10,
             )
         self.assertEqual(result[:3], (False, None, "network_error"))
-        self.assertEqual(session.post.call_count, 1)
+        self.assertEqual(session.post.call_count, len(code_goc.API_ENDPOINTS) * len(code_goc.QUERY_CONFIGS))
         self.assertEqual(create_session.call_args.args, (0,))
         self.assertNotIn("safe", repr(result))
+
+    def test_checker_falls_back_after_one_endpoint_connection_error(self):
+        checker = code_goc.NetflixTokenChecker()
+        session = Mock()
+        response = Mock(status_code=200)
+        response.json.return_value = {"data": {"createAutoLoginToken": "safe-token"}}
+        session.post.side_effect = [requests.exceptions.ConnectionError("temporary"), response]
+        account = {"membership_status": "CURRENT_MEMBER"}
+        with patch.object(checker, "_create_session", return_value=session), patch.object(
+            checker, "get_account_info", return_value=account
+        ), patch("code_goc.time.sleep"):
+            result = checker.check_cookie(
+                {"NetflixId": "safe"}, request_timeout=1, max_retries=0,
+                deadline=time.monotonic() + 10,
+            )
+        self.assertEqual(result[:3], (True, "safe-token", None))
+        self.assertEqual(session.post.call_count, 2)
 
     def test_frontend_nftoken_request_has_timeout_cleanup_and_idempotency(self):
         api_source = Path("miniapp/assets/api.js").read_text(encoding="utf-8")
@@ -117,13 +146,17 @@ class MiniAppTest(unittest.TestCase):
         self.assertIn("AbortController", api_source)
         self.assertIn("finally", api_source)
         self.assertIn("nftokenJob", api_source)
+        self.assertIn("X-PWA-Session", api_source)
+        self.assertIn("pwaSession", api_source)
         self.assertIn("requestId", views_source)
         self.assertIn("Thử lại", views_source)
         self.assertIn("finally", views_source)
         self.assertIn('timeoutMs: 90000', api_source)
         self.assertNotIn('tv-note', views_source)
         self.assertNotIn('Credential nhạy cảm đã được ẩn', views_source)
-        self.assertIn('api.js?v=14', Path("miniapp/assets/app.js").read_text(encoding="utf-8"))
+        self.assertIn('api.js?v=15', Path("miniapp/assets/app.js").read_text(encoding="utf-8"))
+        self.assertIn('beforeinstallprompt', Path("miniapp/assets/app.js").read_text(encoding="utf-8"))
+        self.assertIn('shop-mmo-static-v3', Path("miniapp/sw.js").read_text(encoding="utf-8"))
 
     def test_checkout_is_atomic_and_idempotent(self):
         response = self.client.put("/api/cart/1", json={"quantity": 2}, headers=self.headers)
@@ -197,6 +230,9 @@ class MiniAppTest(unittest.TestCase):
         first = self.client.post("/api/tools/free-cookie", json={}, headers=self.headers)
         self.assertEqual(first.status_code, 200)
         self.assertEqual(first.json["cookie"], "NetflixId=free-cookie")
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        self.assertEqual(connection.execute("SELECT is_used FROM free_cookies WHERE data='NetflixId=free-cookie'").fetchone()[0], 1)
+        connection.close()
         second = self.client.post("/api/tools/free-cookie", json={}, headers=self.headers)
         self.assertEqual(second.status_code, 409)
 

@@ -2,8 +2,13 @@
   "name": "Shop MMO",
   "short_name": "Shop MMO",
   "description": "Shop MMO premium store",
+  "id": "/?source=pwa",
   "start_url": "/?source=pwa",
+  "scope": "/",
   "display": "standalone",
+  "display_override": ["standalone", "fullscreen", "minimal-ui"],
+  "orientation": "portrait",
+  "prefer_related_applications": false,
   "background_color": "#070707",
   "theme_color": "#070707",
   "icons": [

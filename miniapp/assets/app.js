@@ -1,8 +1,9 @@
-import {api} from "./api.js?v=14";
+import {api} from "./api.js?v=15";
 import {state, subscribe, update} from "./state.js";
-import {bottomNav, header, toast} from "./components.js?v=14";
-import {accountView, addToCart, claimFreeCookie, homeView, openCart, openCheckin, openDeposit, openGiftcode, openHelp, openMissions, openNftoken, openNotifications, openOrder, openProduct, openReferral, openSupport, openTvLogin, ordersView, storeView, toolsView} from "./views.js?v=14";
-import {adminView, bindAdminEvents, loadAdmin} from "./admin.js?v=14";
+import {bottomNav, header, toast} from "./components.js?v=15";
+import {accountView, addToCart, claimFreeCookie, homeView, openCart, openCheckin, openDeposit, openGiftcode, openHelp, openMissions, openNftoken, openNotifications, openOrder, openProduct, openReferral, openSupport, openTvLogin, ordersView, storeView, toolsView} from "./views.js?v=15";
+import {adminView, bindAdminEvents, loadAdmin} from "./admin.js?v=15";
+import {translateDom} from "./i18n.js";
 
 const tg = window.Telegram?.WebApp;
 const app = document.querySelector("#app");
@@ -10,8 +11,22 @@ const loading = document.querySelector("#loading");
 const content = document.querySelector("#content");
 let searchTimer;
 let deferredInstallPrompt;
+const PWA_SESSION_KEY = "shop_mmo_pwa_session";
+const isTelegram = Boolean(tg?.initData);
+
+function pwaSession() {
+  try { return localStorage.getItem(PWA_SESSION_KEY) || ""; } catch { return ""; }
+}
+
+function consumePwaHash() {
+  const match = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("pwa_session");
+  if (!match) return;
+  try { localStorage.setItem(PWA_SESSION_KEY, match); } catch {}
+  history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+}
 
 window.addEventListener("beforeinstallprompt", (event) => { event.preventDefault(); deferredInstallPrompt = event; });
+window.addEventListener("appinstalled", () => { deferredInstallPrompt = null; toast("Đã cài Shop MMO"); });
 
 if (tg) {
   tg.ready();
@@ -28,6 +43,7 @@ function render() {
   const copyright = typeof state.bootstrap.copyright === "string" ? state.bootstrap.copyright : (state.bootstrap.copyright?.text || "© mnhut - NFToken Pro");
   content.innerHTML = `${view}<footer class="site-copyright">${copyright}</footer>`;
   bindEvents();
+  translateDom(document.querySelector("#app"));
 }
 
 subscribe(render);
@@ -67,8 +83,15 @@ function bindEvents() {
   document.querySelectorAll("[data-action='deposit']").forEach((node) => node.onclick = openDeposit);
   document.querySelectorAll("[data-action='support']").forEach((node) => node.onclick = openSupport);
   document.querySelectorAll("[data-action='notifications']").forEach((node) => node.onclick = openNotifications);
-  document.querySelectorAll("[data-action='install']").forEach((node) => node.onclick = async () => { if (!deferredInstallPrompt) return toast("Trình duyệt chưa hỗ trợ cài PWA"); deferredInstallPrompt.prompt(); await deferredInstallPrompt.userChoice; deferredInstallPrompt = null; });
-  document.querySelector("[data-language]")?.addEventListener("change", async (event) => { try { await api.setLanguage(event.target.value); state.bootstrap.user.language = event.target.value; render(); } catch (error) { toast(error.message, "error"); } });
+  document.querySelectorAll("[data-action='install']").forEach((node) => node.onclick = installPwa);
+  document.querySelector("[data-language]")?.addEventListener("change", async (event) => {
+    const previous = state.bootstrap.user.language;
+    const next = event.target.value;
+    state.bootstrap.user.language = next;
+    render();
+    try { await api.setLanguage(next); }
+    catch (error) { state.bootstrap.user.language = previous; render(); toast(error.message, "error"); }
+  });
   document.querySelectorAll("[data-action='search']").forEach((node) => node.onclick = () => navigate("store").then(() => document.querySelector("#product-search")?.focus()));
   document.querySelectorAll("[data-action='reload-orders']").forEach((node) => node.onclick = loadOrders);
   document.querySelectorAll("[data-category]").forEach((node) => node.onclick = () => { state.category = node.dataset.category; loadProducts(); });
@@ -83,9 +106,10 @@ async function boot() {
   const message = document.querySelector("#loading-message");
   const retry = document.querySelector("#retry");
   retry.classList.add("hidden");
+  consumePwaHash();
   message.textContent = "Đang xác thực Telegram...";
   try {
-    if (!tg?.initData) throw new Error("Vui lòng mở Mini App từ nút trong bot Telegram.");
+    if (!isTelegram && !pwaSession()) throw new Error("Hãy mở Shop MMO từ Telegram lần đầu để kích hoạt PWA.");
     const [bootstrap, products, cart, notifications] = await Promise.all([api.bootstrap(), api.products(), api.cart(), api.notifications()]);
     state.bootstrap = bootstrap;
     state.products = products.items;
@@ -105,6 +129,28 @@ boot();
 
 setInterval(async () => { if (!state.bootstrap) return; try { const result = await api.notifications(); update({notificationUnread: result.unread || 0}); } catch {} }, 60000);
 
-if ("serviceWorker" in navigator && !window.Telegram?.WebApp) {
+async function installPwa() {
+  if (window.matchMedia("(display-mode: standalone)").matches) return toast("Shop MMO đã được cài trên thiết bị");
+  if (deferredInstallPrompt) {
+    deferredInstallPrompt.prompt();
+    await deferredInstallPrompt.userChoice;
+    deferredInstallPrompt = null;
+    return;
+  }
+  if (isTelegram) {
+    try {
+      const result = await api.pwaSession();
+      const target = new URL(window.location.href);
+      target.hash = `pwa_session=${encodeURIComponent(result.token)}`;
+      tg.openLink?.(target.toString());
+      if (!tg.openLink) window.open(target.toString(), "_blank", "noopener");
+    } catch (error) { toast(error.message, "error"); }
+    return;
+  }
+  const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  toast(ios ? "Chọn Chia sẻ → Thêm vào Màn hình chính" : "Mở menu trình duyệt và chọn Cài đặt ứng dụng");
+}
+
+if ("serviceWorker" in navigator && !isTelegram) {
   window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
 }

@@ -12,7 +12,14 @@ import random
 import sqlite3
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonWebApp, WebAppInfo
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    MenuButtonDefault,
+    MenuButtonWebApp,
+    WebAppInfo,
+)
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
@@ -1944,6 +1951,9 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
 
         cookie_str = self.build_cookie_string(cookie_dict)
         last_error = "Loi khong xac dinh"
+        saw_network_error = False
+        saw_network_timeout = False
+        saw_http_response = False
 
         endpoint_order = list(range(len(API_ENDPOINTS)))
         if self.last_working_endpoint > 0:
@@ -1966,6 +1976,7 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
                     response = http_session.post(
                         api_url, headers=attempt_headers, json=payload, timeout=bounded_timeout()
                     )
+                    saw_http_response = True
                     if response.status_code == 200:
                         data = response.json()
                         token = None
@@ -2008,14 +2019,12 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
                         last_error = f"HTTP {response.status_code}"
                 except requests.exceptions.Timeout:
                     last_error = "Het thoi gian cho"
-                    if max_retries == 0:
-                        return False, None, "network_timeout", {}
+                    saw_network_timeout = True
                     if deadline is not None and time.monotonic() >= deadline:
                         return False, None, "network_timeout", {}
                 except requests.exceptions.ConnectionError:
                     last_error = "Loi ket noi"
-                    if max_retries == 0:
-                        return False, None, "network_error", {}
+                    saw_network_error = True
                 except Exception as e:
                     last_error = str(e)[:50]
                 if deadline is not None:
@@ -2029,6 +2038,15 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
             if "het han" in last_error.lower() or "PERMISSION" in last_error:
                 break
 
+        # max_retries=0 means "do not retry the same HTTP request".  It must
+        # not prevent trying the other official Netflix endpoints/query
+        # variants: a transient failure on one host used to surface as a
+        # false "cannot connect" error even when the next host was healthy.
+        if not saw_http_response:
+            if saw_network_timeout:
+                return False, None, "network_timeout", {}
+            if saw_network_error:
+                return False, None, "network_error", {}
         return False, None, last_error, {}
 
     def format_nftoken_link(self, token: str) -> str:
@@ -2539,6 +2557,7 @@ async def reset_bot_menu(application):
         if not miniapp_url.startswith("https://"):
             raise RuntimeError("TELEGRAM_MINIAPP_URL must be HTTPS")
         await application.bot.set_my_commands([])
+        await application.bot.set_chat_menu_button(menu_button=MenuButtonDefault())
         await application.bot.set_chat_menu_button(
             menu_button=MenuButtonWebApp(
                 text="Shop MMO",
@@ -4012,7 +4031,9 @@ def main():
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     print(f"[{BOT_NAME}] Đang kết nối Telegram (v{BOT_VERSION})...", flush=True)
     application.run_polling(
-        bootstrap_retries=3,
+        # Keep the bot process alive while Telegram connectivity is temporarily unavailable.
+        # python-telegram-bot treats negative values as retry indefinitely.
+        bootstrap_retries=-1,
         drop_pending_updates=True,
         allowed_updates=Update.ALL_TYPES,
     )
