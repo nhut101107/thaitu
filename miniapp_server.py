@@ -1086,12 +1086,29 @@ def create_nftoken():
 @app.post("/api/tools/tv-login")
 @authenticated
 def tv_login():
+    def steps(active="validate", failed=False):
+        names = [
+            ("validate", "Kiểm tra mã TV"),
+            ("cookie", "Chuẩn bị Cookie Premium live"),
+            ("browser", "Mở phiên Netflix bảo mật"),
+            ("connect", "Gửi mã kết nối tới TV"),
+            ("done", "Xác nhận kết nối"),
+        ]
+        order = {key: index for index, (key, _label) in enumerate(names)}
+        current = order.get(active, 0)
+        result = []
+        for index, (key, label) in enumerate(names):
+            status = "done" if active == "done" or index < current else "active" if index == current else "pending"
+            if failed and index == current:
+                status = "error"
+            result.append({"key": key, "label": label, "status": status})
+        return result
     try:
         tv_code = str(json_body().get("code", "")).replace(" ", "").replace("-", "")
     except ValueError as error:
         return jsonify({"ok": False, "error": str(error)}), 400
     if not (4 <= len(tv_code) <= 12 and tv_code.isalnum()):
-        return jsonify({"ok": False, "error": "Mã TV không hợp lệ"}), 400
+        return jsonify({"ok": False, "error": "Mã TV không hợp lệ", "steps": steps("validate", True)}), 400
     user_id = int(g.telegram_user["id"])
     if tool_rate_limited(user_id, limit=3, window=60):
         return jsonify({"ok": False, "error": "Bạn thao tác quá nhanh"}), 429
@@ -1104,18 +1121,25 @@ def tv_login():
     try:
         cookie_id, cookie_data = reserve_cookie(connection)
         success, message, account = run_tv_login(cookie_data, tv_code)
-        release_cookie(connection, cookie_id, delete=("Cookie đã chết" in message))
+        dead_cookie = any(word in message.lower() for word in ("cookie đã chết", "cookie hết hạn", "cookie sai"))
+        release_cookie(connection, cookie_id, delete=dead_cookie)
         cookie_id = None
         if not success:
-            return jsonify({"ok": False, "error": message}), 409
-        return jsonify({"ok": True, "message": "TV đã được kết nối", "account": public_account(account)})
+            failed_stage = "cookie" if dead_cookie else "connect"
+            return jsonify({"ok": False, "error": message, "steps": steps(failed_stage, True)}), 409
+        return jsonify({
+            "ok": True,
+            "message": "TV đã được kết nối",
+            "account": public_account(account),
+            "steps": steps("done"),
+        })
     except ToolError as error:
-        return jsonify({"ok": False, "error": str(error)}), error.status
+        return jsonify({"ok": False, "error": str(error), "steps": steps("cookie", True)}), error.status
     except Exception:
         if cookie_id is not None:
             release_cookie(connection, cookie_id)
         app.logger.exception("TV login failed for user_id=%s", user_id)
-        return jsonify({"ok": False, "error": "Không thể đăng nhập TV lúc này"}), 500
+        return jsonify({"ok": False, "error": "Không thể đăng nhập TV lúc này", "steps": steps("browser", True)}), 500
 
 
 @app.post("/api/giftcode")
