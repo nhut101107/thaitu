@@ -915,11 +915,18 @@ class NetflixTokenChecker:
         self.last_working_endpoint = 0
         self.last_working_query = 0
 
-    def _create_session(self):
+    def _create_session(self, retries=MAX_RETRIES):
         session = requests.Session()
+        try:
+            retry_count = max(0, int(retries))
+        except (TypeError, ValueError):
+            retry_count = MAX_RETRIES
         retry_strategy = Retry(
-            total=MAX_RETRIES,
-            backoff_factor=RETRY_BACKOFF,
+            total=retry_count,
+            connect=retry_count,
+            read=retry_count,
+            status=retry_count,
+            backoff_factor=RETRY_BACKOFF if retry_count else 0,
             status_forcelist=[429, 500, 502, 503, 504, 408],
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
@@ -1551,7 +1558,13 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
                     info['country'] = cc
                     info['country_currency'] = self._get_country_currency(cc)
 
-    def get_account_info(self, cookie_dict: Dict[str, str]) -> Dict[str, str]:
+    def get_account_info(
+        self,
+        cookie_dict: Dict[str, str],
+        session=None,
+        request_timeout=None,
+        deadline=None,
+    ) -> Dict[str, str]:
         """Get comprehensive Netflix account info using multiple API methods."""
         info = {
             'account_name': 'N/A', 'email': 'N/A', 'email_masked': 'N/A',
@@ -1563,6 +1576,19 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
             'extra_member_slots': 'N/A', 'profile_count': 'N/A', 'profiles': [],
             '_account_name_candidates': [],
         }
+        http_session = session or self.session
+
+        def bounded_timeout(default):
+            candidates = [float(default)]
+            if request_timeout is not None:
+                candidates.append(float(request_timeout))
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise requests.exceptions.Timeout("account info deadline exceeded")
+                candidates.append(remaining)
+            return max(0.1, min(candidates))
+
         try:
             cookie_str = self.build_cookie_string(cookie_dict)
             headers = {
@@ -1591,7 +1617,9 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
 
             for url in target_urls:
                 try:
-                    res = self.session.get(url, headers=headers, timeout=15, allow_redirects=True)
+                    res = http_session.get(
+                        url, headers=headers, timeout=bounded_timeout(15), allow_redirects=True
+                    )
                     if res.status_code != 200:
                         continue
 
@@ -1633,7 +1661,9 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
 
                 try:
                     profiles_url = f'https://www.netflix.com/api/shakti/{build_id}/profiles'
-                    pres = self.session.get(profiles_url, headers=shakti_headers, timeout=10)
+                    pres = http_session.get(
+                        profiles_url, headers=shakti_headers, timeout=bounded_timeout(10)
+                    )
                     if pres.status_code == 200:
                         pdata = pres.json()
                         pnames = []
@@ -1686,9 +1716,9 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
                     if auth_url:
                         pe_params['authURL'] = auth_url
 
-                    pe_res = self.session.get(
+                    pe_res = http_session.get(
                         path_url, params=pe_params,
-                        headers=shakti_headers, timeout=10
+                        headers=shakti_headers, timeout=bounded_timeout(10)
                     )
                     if pe_res.status_code == 200:
                         pe_data = pe_res.json()
@@ -1753,9 +1783,28 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
         normalized.pop('_account_name_candidates', None)
         return normalized
 
-    def check_cookie(self, cookie_dict: Dict[str, str]) -> Tuple[bool, Optional[str], Optional[str], Dict[str, str]]:
+    def check_cookie(
+        self,
+        cookie_dict: Dict[str, str],
+        request_timeout=None,
+        max_retries=None,
+        deadline=None,
+    ) -> Tuple[bool, Optional[str], Optional[str], Dict[str, str]]:
         if 'NetflixId' not in cookie_dict:
             return False, None, "Thieu NetflixId", {}
+
+        http_session = self.session if max_retries is None else self._create_session(max_retries)
+
+        def bounded_timeout():
+            candidates = [float(REQUEST_TIMEOUT)]
+            if request_timeout is not None:
+                candidates.append(float(request_timeout))
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise requests.exceptions.Timeout("cookie check deadline exceeded")
+                candidates.append(remaining)
+            return max(0.1, min(candidates))
 
         cookie_str = self.build_cookie_string(cookie_dict)
         last_error = "Loi khong xac dinh"
@@ -1773,11 +1822,13 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
         for ei in endpoint_order:
             api_url = API_ENDPOINTS[ei]
             for qi in query_order:
+                if deadline is not None and time.monotonic() >= deadline:
+                    return False, None, "network_timeout", {}
                 payload = QUERY_CONFIGS[qi]
                 try:
                     attempt_headers = self._get_headers(cookie_str)
-                    response = self.session.post(
-                        api_url, headers=attempt_headers, json=payload, timeout=REQUEST_TIMEOUT
+                    response = http_session.post(
+                        api_url, headers=attempt_headers, json=payload, timeout=bounded_timeout()
                     )
                     if response.status_code == 200:
                         data = response.json()
@@ -1787,7 +1838,12 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
                         if isinstance(token, str) and token.strip():
                             self.last_working_endpoint = ei
                             self.last_working_query = qi
-                            account_info = self.get_account_info(cookie_dict)
+                            account_info = self.get_account_info(
+                                cookie_dict,
+                                session=http_session,
+                                request_timeout=request_timeout,
+                                deadline=deadline,
+                            )
                             return True, token, None, account_info
                         elif 'errors' in data:
                             errors = data.get('errors', [])
@@ -1809,11 +1865,23 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
                         last_error = f"HTTP {response.status_code}"
                 except requests.exceptions.Timeout:
                     last_error = "Het thoi gian cho"
+                    if max_retries == 0:
+                        return False, None, "network_timeout", {}
+                    if deadline is not None and time.monotonic() >= deadline:
+                        return False, None, "network_timeout", {}
                 except requests.exceptions.ConnectionError:
                     last_error = "Loi ket noi"
+                    if max_retries == 0:
+                        return False, None, "network_error", {}
                 except Exception as e:
                     last_error = str(e)[:50]
-                time.sleep(0.3)
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False, None, "network_timeout", {}
+                    time.sleep(min(0.3, remaining))
+                else:
+                    time.sleep(0.3)
 
             if "het han" in last_error.lower() or "PERMISSION" in last_error:
                 break

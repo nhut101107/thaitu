@@ -7,9 +7,11 @@ import sqlite3
 import tempfile
 import time
 import unittest
+import requests
+import code_goc
 import zipfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.parse import urlencode
 
 import miniapp_server
@@ -72,7 +74,7 @@ class MiniAppTest(unittest.TestCase):
 
     def test_cookie_check_has_hard_timeout(self):
         with patch("code_goc.checker.extract_cookies_from_text", return_value=[{"NetflixId": "safe"}]), patch(
-            "code_goc.checker.check_cookie", side_effect=lambda _cookies: time.sleep(0.2)
+            "code_goc.checker.check_cookie", side_effect=lambda _cookies, **_kwargs: time.sleep(0.2)
         ):
             result = miniapp_server.run_cookie_check("NetflixId=safe", timeout=0.01)
         self.assertEqual(result[2], "network_timeout")
@@ -84,6 +86,30 @@ class MiniAppTest(unittest.TestCase):
         ), patch("code_goc.checker.build_netscape_format", return_value="netscape"):
             result = miniapp_server.run_cookie_check("NetflixId=safe", timeout=1)
         self.assertEqual(result, (True, "safe-token", None, account, "netscape"))
+
+    def test_cookie_check_uses_bounded_no_retry_checker_mode(self):
+        account = {"membership_status": "CURRENT_MEMBER"}
+        with patch("code_goc.checker.extract_cookies_from_text", return_value=[{"NetflixId": "safe"}]), patch(
+            "code_goc.checker.check_cookie", return_value=(True, "safe-token", None, account)
+        ) as check, patch("code_goc.checker.build_netscape_format", return_value="netscape"):
+            miniapp_server.run_cookie_check("NetflixId=safe", timeout=2)
+        self.assertEqual(check.call_args.kwargs["max_retries"], 0)
+        self.assertLessEqual(check.call_args.kwargs["request_timeout"], 2)
+        self.assertGreater(check.call_args.kwargs["deadline"], time.monotonic() - 2.1)
+
+    def test_checker_network_error_fails_fast_without_cookie_logging(self):
+        checker = code_goc.NetflixTokenChecker()
+        session = Mock()
+        session.post.side_effect = requests.exceptions.ConnectionError("blocked upstream")
+        with patch.object(checker, "_create_session", return_value=session) as create_session:
+            result = checker.check_cookie(
+                {"NetflixId": "safe"}, request_timeout=1, max_retries=0,
+                deadline=time.monotonic() + 1,
+            )
+        self.assertEqual(result[:3], (False, None, "network_error"))
+        self.assertEqual(session.post.call_count, 1)
+        self.assertEqual(create_session.call_args.args, (0,))
+        self.assertNotIn("safe", repr(result))
 
     def test_frontend_nftoken_request_has_timeout_cleanup_and_idempotency(self):
         api_source = Path("miniapp/assets/api.js").read_text(encoding="utf-8")
@@ -240,6 +266,26 @@ class MiniAppTest(unittest.TestCase):
         self.assertEqual(connection.execute("SELECT nftoken_credits FROM users WHERE user_id=1").fetchone()[0], 1)
         self.assertEqual(connection.execute("SELECT is_used FROM premium_cookies WHERE data='NetflixId=timeout-cookie'").fetchone()[0], 0)
         self.assertEqual(connection.execute("SELECT status FROM nftoken_jobs WHERE request_id='timeout-request-1'").fetchone()[0], "error")
+        connection.close()
+
+    def test_nftoken_network_error_returns_safe_reason_and_refunds(self):
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute("UPDATE users SET nftoken_credits=1 WHERE user_id=1")
+        connection.execute("INSERT INTO premium_cookies(data) VALUES('NetflixId=network-cookie')")
+        connection.commit()
+        connection.close()
+        with patch.object(miniapp_server, "run_cookie_check", return_value=(False, None, "network_error", {}, None)):
+            response = self.client.post(
+                "/api/tools/nftoken",
+                json={"mode": "plan", "quantity": 1, "requestId": "network-request-1"},
+                headers=self.headers,
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json["reason_code"], "network_error")
+        self.assertNotIn("NetflixId", response.get_data(as_text=True))
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        self.assertEqual(connection.execute("SELECT nftoken_credits FROM users WHERE user_id=1").fetchone()[0], 1)
+        self.assertEqual(connection.execute("SELECT is_used FROM premium_cookies WHERE data='NetflixId=network-cookie'").fetchone()[0], 0)
         connection.close()
 
     def test_dead_cookie_is_deleted_but_unknown_failure_is_returned_to_stock(self):

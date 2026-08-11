@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -661,6 +662,9 @@ def migrate():
 
 @app.before_request
 def ensure_migrated():
+    if request.method == "POST" and request.path == "/api/tools/nftoken":
+        g.nftoken_request_started = time.monotonic()
+        g.nftoken_request_id = "-"
     if DATABASE_PATH in MIGRATED_PATHS:
         return
     with MIGRATION_LOCK:
@@ -950,7 +954,7 @@ def release_cookie(connection, cookie_id, delete=False):
     connection.commit()
 
 
-def run_cookie_check(cookie_data, timeout=None):
+def run_cookie_check(cookie_data, timeout=None, request_id=None):
     """Lazy import keeps normal Mini App startup light and makes the checker testable."""
     from code_goc import checker
 
@@ -959,12 +963,28 @@ def run_cookie_check(cookie_data, timeout=None):
         return False, None, "Cookie sai định dạng", {}, None
     cookies = parsed[0]
     check_timeout = COOKIE_CHECK_TIMEOUT if timeout is None else max(0.01, float(timeout))
-    future = COOKIE_CHECK_EXECUTOR.submit(checker.check_cookie, cookies)
+    check_timeout = min(COOKIE_CHECK_TIMEOUT, check_timeout)
+    worker_deadline = time.monotonic() + check_timeout
+    # The Mini App must fail fast when the VPS cannot reach Netflix.  The bot's
+    # normal checker keeps its existing retry policy; only this bounded worker
+    # uses a no-retry session and a deadline.
+    request_timeout = min(8.0, check_timeout)
+    future = COOKIE_CHECK_EXECUTOR.submit(
+        checker.check_cookie,
+        cookies,
+        request_timeout=request_timeout,
+        max_retries=0,
+        deadline=worker_deadline,
+    )
     try:
         success, token, error, account = future.result(timeout=check_timeout)
     except FutureTimeoutError:
         future.cancel()
-        app.logger.warning("NFToken check timed out after %ss", check_timeout)
+        app.logger.warning(
+            "NFToken check timed out request_id=%s after=%ss",
+            request_id or "-",
+            check_timeout,
+        )
         return False, None, "network_timeout", {}, None
     netscape = checker.build_netscape_format(cookies) if success and token else None
     return success, token, error, account, netscape
@@ -1415,6 +1435,19 @@ def security_headers(response):
     )
     if request.path == "/" or request.path.startswith("/assets/"):
         response.headers["Cache-Control"] = "no-store"
+    if request.method == "POST" and request.path == "/api/tools/nftoken":
+        payload = response.get_json(silent=True) or {}
+        raw_reason = payload.get("reason_code") or ("ok" if payload.get("ok") else "http_error")
+        reason_code = "".join(
+            char for char in str(raw_reason)[:40] if char.isalnum() or char in "._-"
+        ) or "http_error"
+        started = getattr(g, "nftoken_request_started", time.monotonic())
+        duration_ms = int(max(0, (time.monotonic() - started) * 1000))
+        trace = (
+            f"NFToken request_id={getattr(g, 'nftoken_request_id', '-')} "
+            f"status={response.status_code} reason={reason_code} duration_ms={duration_ms}"
+        )
+        print(trace, file=sys.stderr, flush=True)
     return response
 
 
@@ -1939,7 +1972,7 @@ def free_cookie():
         return jsonify({"ok": False, "error": "Không thể nhận Cookie lúc này"}), 500
 
 
-def generate_one_nftoken(connection, user_id, mode, deadline=None):
+def generate_one_nftoken(connection, user_id, mode, deadline=None, request_id=None):
     cookie_id, cookie_data, quota_source = reserve_nftoken_request(connection, user_id, mode)
     last_error = "Không tìm thấy Cookie hoạt động"
     last_reason_code = "cookie_unavailable"
@@ -1950,10 +1983,14 @@ def generate_one_nftoken(connection, user_id, mode, deadline=None):
             raise ToolError("Máy chủ xử lý quá lâu, vui lòng thử lại", 504, "nftoken_timeout")
         try:
             if deadline is None:
-                success, token, error, account, netscape = run_cookie_check(cookie_data)
+                success, token, error, account, netscape = run_cookie_check(
+                    cookie_data, request_id=request_id
+                )
             else:
                 check_timeout = max(0.1, min(COOKIE_CHECK_TIMEOUT, deadline - time.monotonic()))
-                success, token, error, account, netscape = run_cookie_check(cookie_data, timeout=check_timeout)
+                success, token, error, account, netscape = run_cookie_check(
+                    cookie_data, timeout=check_timeout, request_id=request_id
+                )
         except Exception as exc:
             app.logger.error("NFToken check failed type=%s", type(exc).__name__)
             success, token, error, account, netscape = False, None, "checker_exception", {}, None
@@ -2067,6 +2104,7 @@ def create_nftoken():
     user_id = int(g.telegram_user["id"])
     try:
         request_id = normalize_nftoken_request_id(body.get("requestId") or body.get("idempotencyKey"))
+        g.nftoken_request_id = request_id
     except ToolError as error:
         return jsonify({"ok": False, "reason_code": error.reason_code, "error": str(error)}), error.status
     connection = db()
@@ -2089,7 +2127,11 @@ def create_nftoken():
     deadline = time.monotonic() + NFTOKEN_TOTAL_TIMEOUT
     try:
         for _ in range(quantity):
-            results.append(generate_one_nftoken(connection, user_id, mode, deadline=deadline))
+            results.append(
+                generate_one_nftoken(
+                    connection, user_id, mode, deadline=deadline, request_id=request_id
+                )
+            )
     except ToolError as error:
         if not results:
             finish_nftoken_job(connection, request_id, "error", reason_code=error.reason_code, message=str(error), status_code=error.status)

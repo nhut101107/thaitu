@@ -13,13 +13,19 @@ async function request(path, options = {}) {
   const isForm = options.body instanceof FormData;
   const timeoutMs = options.timeoutMs || (path === "/api/tools/nftoken" ? 60000 : 30000);
   const controller = new AbortController();
+  const externalSignal = options.signal;
+  const forwardAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener("abort", forwardAbort, {once: true});
+  }
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let response;
   let payload;
   try {
     response = await fetch(path, {
       ...options,
-      signal: options.signal || controller.signal,
+      signal: controller.signal,
       headers: {
         ...(isForm ? {} : {"Content-Type": "application/json"}),
         "X-Telegram-Init-Data": tg?.initData || "",
@@ -28,7 +34,7 @@ async function request(path, options = {}) {
     });
     payload = await response.json().catch(() => ({}));
   } catch (_error) {
-    if (controller.signal.aborted) {
+    if (controller.signal.aborted || externalSignal?.aborted) {
       const reasonCode = path === "/api/tools/nftoken" ? "nftoken_timeout" : "network_timeout";
       const message = path === "/api/tools/nftoken" ? "Máy chủ xử lý quá lâu, vui lòng thử lại" : "Máy chủ phản hồi quá chậm, vui lòng thử lại";
       throw new ApiError(message, 504, {reason_code: reasonCode});
@@ -36,6 +42,7 @@ async function request(path, options = {}) {
     throw new ApiError("Không thể kết nối máy chủ", 0, {reason_code: "network_error"});
   } finally {
     clearTimeout(timeout);
+    externalSignal?.removeEventListener("abort", forwardAbort);
   }
   if (!response.ok || !payload.ok) {
     const fallback = response.status >= 500

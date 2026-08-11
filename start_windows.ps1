@@ -54,6 +54,9 @@ $botErr = Join-Path $LogDir "bot.error.log"
 $mini = Start-Process -FilePath $Python -ArgumentList @("miniapp_server.py") -WorkingDirectory $AppDir -RedirectStandardOutput $miniLog -RedirectStandardError $miniErr -PassThru
 $bot = Start-Process -FilePath $Python -ArgumentList @("code_goc.py") -WorkingDirectory $AppDir -RedirectStandardOutput $botLog -RedirectStandardError $botErr -PassThru
 
+Set-Content -LiteralPath (Join-Path $LogDir "miniapp.pid") -Value $mini.Id -NoNewline
+Set-Content -LiteralPath (Join-Path $LogDir "bot.pid") -Value $bot.Id -NoNewline
+
 Write-Host "NFToken Pro đã chạy."
 Write-Host ("Mini App PID: {0} | http://{1}:{2}" -f $mini.Id, $env:MINIAPP_HOST, $env:MINIAPP_PORT)
 Write-Host ("Bot PID:       {0}" -f $bot.Id)
