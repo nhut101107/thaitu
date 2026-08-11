@@ -19,7 +19,22 @@ Telegram ID trong `TELEGRAM_ADMIN_ID` có thêm Trung tâm quản trị riêng n
 
 Mỗi sản phẩm có hai quyền lợi tách biệt: `nftoken_credits` là số lượt tạo link NFToken đã mua và `credits` là số lượt lấy Cookie VIP. Checkout cộng hai loại lượt trong cùng transaction. Khi tạo NFToken, hệ thống ưu tiên dùng lượt đã mua; nếu hết mới dùng hạn mức hằng ngày của gói. Nếu kiểm tra Cookie thất bại, đúng loại lượt vừa dùng sẽ được hoàn lại.
 
-Admin có thể tải file `.txt` hoặc `.zip` vào kho. Backend chỉ đọc file TXT trong ZIP, không giải nén ra filesystem, chặn ZIP mã hóa/ZIP bomb, giới hạn 10MB và tối đa 100 Cookie. Cookie được kiểm tra song song và chỉ tài khoản `CURRENT_MEMBER` tạo được NFToken mới được lưu; giao diện trả về tổng đã kiểm tra, live, lỗi và trùng.
+Admin có thể chọn nhiều file hoặc chọn nguyên thư mục Cookie từ Mini App. Backend chỉ nhận `.txt`, `.zip`, `.rar`, tự bỏ qua file khác, không giải nén ra filesystem, chặn archive mã hóa/ZIP bomb, gom trùng và kiểm tra song song ở nền. Mặc định mỗi lần nhận tối đa 512MB, 10.000 file và 250.000 Cookie; có thể tăng/giảm bằng `INVENTORY_MAX_UPLOAD_MB`, `INVENTORY_MAX_FILE_MB`, `INVENTORY_MAX_FILES`, `INVENTORY_MAX_ENTRIES` trong `.env`. Chỉ tài khoản `CURRENT_MEMBER` tạo được NFToken mới được lưu; giao diện hiển thị tiến độ live/lỗi/trùng và không chặn người dùng khác.
+
+## Windows Server 2022
+
+Trên VPS Windows, cài Python 3.11+ rồi mở PowerShell tại thư mục repo:
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+Copy-Item .env.example .env
+notepad .env
+powershell -ExecutionPolicy Bypass -File .\start_windows.ps1
+```
+
+Điền token, Admin ID, URL Mini App HTTPS, đường dẫn SQLite và giới hạn kho trong `.env`. Script tự tạo `.venv`, cài requirements, chạy Mini App và bot thành hai tiến trình; log nằm trong thư mục `logs\\`. Để Telegram truy cập được từ Internet, dùng domain HTTPS qua IIS/reverse proxy hoặc Cloudflare Tunnel trỏ vào `MINIAPP_HOST:MINIAPP_PORT`; không dùng `127.0.0.1` làm URL Telegram.
+
+Trong Admin → Quản lý kho Cookie, chọn “Chọn nhiều file” hoặc “Chọn thư mục”. Có thể đưa cả folder chứa hàng nghìn TXT; file không hỗ trợ sẽ bị bỏ qua, Cookie được lọc live ở nền và kết quả tự cập nhật trên app.
 
 ## Chạy local
 
