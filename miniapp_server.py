@@ -1892,7 +1892,8 @@ def generate_one_nftoken(connection, user_id, mode):
         if success and token and account.get("membership_status") == "CURRENT_MEMBER":
             # The validated Cookie is a temporary delivery hold; return it to stock.
             release_cookie(connection, cookie_id, delete=False)
-            nftoken_text = f"NFToken URL: https://netflix.com/?nftoken={quote(str(token), safe='')}\n"
+            copyright_data = copyright_payload(connection)
+            nftoken_text = watermark_export(f"NFToken URL: https://netflix.com/?nftoken={quote(str(token), safe='')}\n", copyright_data["text"], f"NFT-{user_id}-{int(time.time())}", user_id, enabled=copyright_data["enabled"])
             download_url = create_secure_download(connection, user_id, 0, nftoken_text, f"nftoken-{user_id}.txt")
             connection.commit()
             return {
