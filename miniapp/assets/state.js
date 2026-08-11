@@ -11,6 +11,7 @@ export const state = {
   category: "",
   sort: "popular",
   busy: false,
+  notificationUnread: 0,
 };
 
 const listeners = new Set();

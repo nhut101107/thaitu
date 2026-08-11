@@ -93,6 +93,7 @@ export const api = {
   adminReferralLeaderboards: () => request("/api/admin/referral-leaderboards"),
   adminUpdateReferralLeaderboard: (period, value) => request(`/api/admin/referral-leaderboards/${period}`, {method: "PUT", body: JSON.stringify(value)}),
   adminReports: (params = {}) => request(`/api/admin/reports?${new URLSearchParams(params)}`),
+  adminReportsCsv: async () => { const response = await fetch("/api/admin/reports?format=csv", {headers: {"X-Telegram-Init-Data": tg?.initData || ""}}); if (!response.ok) throw new ApiError("Không thể tải báo cáo", response.status); return response.blob(); },
   adminMissions: () => request("/api/admin/missions"),
   adminCreateMission: (value) => request("/api/admin/missions", {method: "POST", body: JSON.stringify(value)}),
   adminUpdateMission: (id, value) => request(`/api/admin/missions/${id}`, {method: "PUT", body: JSON.stringify(value)}),

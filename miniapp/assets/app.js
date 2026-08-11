@@ -86,11 +86,12 @@ async function boot() {
   message.textContent = "Đang xác thực Telegram...";
   try {
     if (!tg?.initData) throw new Error("Vui lòng mở Mini App từ nút trong bot Telegram.");
-    const [bootstrap, products, cart] = await Promise.all([api.bootstrap(), api.products(), api.cart()]);
+    const [bootstrap, products, cart, notifications] = await Promise.all([api.bootstrap(), api.products(), api.cart(), api.notifications()]);
     state.bootstrap = bootstrap;
     state.products = products.items;
     state.categories = products.categories;
     state.cart = cart;
+    state.notificationUnread = notifications.unread || 0;
     loading.classList.add("fade-out");
     setTimeout(() => { loading.classList.add("hidden"); app.classList.remove("hidden"); render(); }, 220);
   } catch (error) {
@@ -102,7 +103,7 @@ async function boot() {
 
 boot();
 
-setInterval(() => { if (state.bootstrap) api.notifications().catch(() => {}); }, 60000);
+setInterval(async () => { if (!state.bootstrap) return; try { const result = await api.notifications(); update({notificationUnread: result.unread || 0}); } catch {} }, 60000);
 
 if ("serviceWorker" in navigator && !window.Telegram?.WebApp) {
   window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));

@@ -224,7 +224,7 @@ export async function openNotifications() {
   try {
     const result = await api.notifications();
     modal(`<div class="eyebrow">NFToken Pro</div><h2>Thông báo</h2>${result.items.length ? result.items.map((item) => `<article class="notification-item ${item.is_read ? "read" : "unread"}"><b>${escapeHtml(item.title)}</b><p>${escapeHtml(item.body)}</p><small>${escapeHtml(item.created_at)}</small></article>`).join("") : emptyState("Chưa có thông báo", "Thông báo hệ thống sẽ xuất hiện tại đây.")}<button class="button secondary wide" data-read-all>Đánh dấu đã đọc</button>`, {onOpen(root) { root.querySelector("[data-read-all]")?.addEventListener("click", async () => { await api.markNotificationsRead([], true); toast("Đã đánh dấu đã đọc"); }); }});
-    if (result.unread) await api.markNotificationsRead([], true);
+    if (result.unread) { await api.markNotificationsRead([], true); update({notificationUnread: 0}); }
   } catch (error) { toast(error.message, "error"); }
 }
 

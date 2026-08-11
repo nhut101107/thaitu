@@ -234,3 +234,4 @@ body::after { right: -150px; bottom: 18%; background: #18181b; animation-delay: 
  .notification-item.unread { border-left: 3px solid #fff; padding-left: 10px; }
  .notification-item p { margin: 6px 0; opacity: .8; }
  .notification-item small { opacity: .55; }
+ .notification-badge { position: absolute; top: -4px; right: -4px; min-width: 16px; height: 16px; border-radius: 999px; background: #dc2626; color: #fff; font-size: 10px; line-height: 16px; font-style: normal; }
