@@ -46,7 +46,17 @@ class AccountNormalizationTest(unittest.TestCase):
         self.assertNotIn("Mở NFToken Mini App", source)
         self.assertNotIn("MỞ NFToken MINI APP", source)
         self.assertNotIn("/app", source)
-        self.assertIn("MenuButtonCommands", source)
+        self.assertIn("MenuButtonWebApp", source)
+
+    def test_bot_menu_exposes_only_shop_mmo_mini_app(self):
+        source = Path(code_goc.__file__).read_text(encoding="utf-8")
+        self.assertNotIn('CommandHandler("app"', source)
+        self.assertNotIn("/app", source)
+        self.assertIn("MenuButtonWebApp", source)
+        self.assertIn("Shop MMO", source)
+        self.assertIn("set_my_commands([])", source)
+        self.assertNotIn("callback_data='store_main'", source)
+        self.assertNotIn("callback_data='deposit_main'", source)
 
 
 if __name__ == "__main__":

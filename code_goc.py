@@ -12,7 +12,7 @@ import random
 import sqlite3
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonCommands
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, MenuButtonWebApp, WebAppInfo
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
@@ -2288,21 +2288,25 @@ def process_tv_login(cookie_dict: dict, tv_code: str) -> Tuple[bool, str, str, d
 
 def kb_main():
     rows = []
-    rows.extend([
-        [InlineKeyboardButton("🛒 Cửa Hàng", callback_data='store_main'), InlineKeyboardButton("💸 Nạp Tiền", callback_data='deposit_main')],
-        [InlineKeyboardButton("Lấy Cookie (Đã Mua)", callback_data='extract_vip'), InlineKeyboardButton("Tạo Link (Theo Gói)", callback_data='menu_chk')],
-        [InlineKeyboardButton("📺 Đăng nhập TV (FREE)", callback_data='menu_tv_log'), InlineKeyboardButton("🎁 Điểm Danh", callback_data='menu_freecookie')],
-        [InlineKeyboardButton("📜 Lịch Sử Gói", callback_data='purchase_history'), InlineKeyboardButton("📚 Hướng Dẫn", callback_data='menu_help')]
-    ])
+    miniapp_url = os.getenv("TELEGRAM_MINIAPP_URL", "").strip()
+    if miniapp_url.startswith("https://"):
+        rows.append([InlineKeyboardButton("📱 Shop MMO", web_app=WebAppInfo(url=miniapp_url))])
     return InlineKeyboardMarkup(rows)
 
 async def reset_bot_menu(application):
-    """Remove the previously configured Mini App menu button."""
+    """Show only the Shop MMO Mini App in Telegram's menu."""
     try:
+        miniapp_url = os.getenv("TELEGRAM_MINIAPP_URL", "").strip()
+        if not miniapp_url.startswith("https://"):
+            raise RuntimeError("TELEGRAM_MINIAPP_URL must be HTTPS")
+        await application.bot.set_my_commands([])
         await application.bot.set_chat_menu_button(
-            menu_button=MenuButtonCommands()
+            menu_button=MenuButtonWebApp(
+                text="Shop MMO",
+                web_app=WebAppInfo(url=miniapp_url),
+            )
         )
-        logger.info("Đã đặt menu Telegram về danh sách lệnh")
+        logger.info("Telegram menu configured with Shop MMO Mini App")
     except Exception:
         logger.exception("Không thể đặt lại menu Telegram")
 
