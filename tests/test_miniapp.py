@@ -713,6 +713,7 @@ class MiniAppTest(unittest.TestCase):
         card = format_account_card(account, "https://example.invalid")
         self.assertIn("Nguyên\\_Văn\\[", card)
         self.assertNotIn("NguyÃªn", card)
+        self.assertNotIn("Nếu có lỗi xảy ra", card)
 
 if __name__ == "__main__":
     unittest.main()

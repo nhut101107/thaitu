@@ -838,8 +838,7 @@ def format_account_card(account: dict, link: str, index: int = 0) -> str:
         f"├ Extra Member: {extra_member}\n"
         f"├ Số Profile: {profile_count}\n"
         f"└ Profiles: {profiles_str}\n\n"
-        f"🔗 **Link Đăng Nhập:**\n`{link}`\n\n"
-        f"Nếu có lỗi xảy ra, hãy bấm nút Báo lỗi bên dưới:"
+         f"🔗 **Link Đăng Nhập:**\n`{link}`"
     )
 
     hidden_markers = {
