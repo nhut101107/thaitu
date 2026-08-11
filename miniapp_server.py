@@ -1578,7 +1578,7 @@ def free_cookie():
         if not cookie:
             connection.rollback()
             return jsonify({"ok": False, "error": "Kho Cookie miễn phí đang trống"}), 409
-        connection.execute("UPDATE free_cookies SET is_used=1 WHERE id=?", (cookie["id"],))
+        connection.execute("UPDATE free_cookies SET is_used=0 WHERE id=?", (cookie["id"],))
         if checkin_row:
             connection.execute("UPDATE free_cookie_checkins SET claimed=claimed-1 WHERE user_id=? AND local_date=? AND claimed>0", (user_id, today))
         else:
@@ -1607,6 +1607,8 @@ def generate_one_nftoken(connection, user_id, mode):
             app.logger.exception("NFToken check failed")
             success, token, error, account, netscape = False, None, str(exc), {}, None
         if success and token and account.get("membership_status") == "CURRENT_MEMBER":
+            # The validated Cookie is a temporary delivery hold; return it to stock.
+            release_cookie(connection, cookie_id, delete=False)
             return {
                 "link": f"https://netflix.com/?nftoken={quote(str(token), safe='')}",
                 "account": public_account(account),
@@ -1636,7 +1638,7 @@ def create_nftoken():
         return jsonify({"ok": False, "error": "Chế độ không hợp lệ"}), 400
     if mode == "plan":
         quantity = 1
-    if not 1 <= quantity <= 5:
+    if not 1 <= quantity <= 1:
         return jsonify({"ok": False, "error": "Mỗi lần chỉ rút từ 1 đến 5 Cookie"}), 400
     user_id = int(g.telegram_user["id"])
     connection = db()

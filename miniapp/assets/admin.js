@@ -93,12 +93,12 @@ function productDialog(item = null) {
     <label class="field">Danh mục<input name="category" maxlength="80" value="${escapeHtml(item?.category || "Gói Cookie VIP")}" required></label>
     <label class="field">Mô tả<textarea name="description" maxlength="1000">${escapeHtml(item?.description || "")}</textarea></label>
     <label class="field">Link ảnh HTTPS<input name="imageUrl" type="url" value="${escapeHtml(item?.imageUrl || "")}" placeholder="https://..."></label>
-    <label class="field">Số ngày bảo hành<input name="warrantyDays" type="number" min="0" max="3650" value="${item?.warrantyDays || 0}"></label>
+    <label class="field">Số ngày bảo hành<input name="warrantyDays" type="number" min="0" max="3650" value="${item?.warrantyDays || 0}"></label><label class="check-row"><input name="noWarranty" type="checkbox" ${item && !item.warrantyDays ? "checked" : ""}> Không bảo hành</label>
     <div class="check-row"><label><input name="featured" type="checkbox" ${item?.featured ? "checked" : ""}> Sản phẩm nổi bật</label><label><input name="active" type="checkbox" ${item?.available !== false ? "checked" : ""}> Đang bán</label></div>
     <button class="button wide">${item ? "Lưu thay đổi" : "Tạo sản phẩm"}</button></form>`, {onOpen(root, close) {
       root.querySelector("[data-product-form]").onsubmit = async (event) => {
         event.preventDefault(); const form = new FormData(event.currentTarget);
-        const value = {name: form.get("name"), price: Number(form.get("price")), nftokenCredits: Number(form.get("nftokenCredits")), credits: Number(form.get("credits")), category: form.get("category"), description: form.get("description"), imageUrl: form.get("imageUrl"), warrantyDays: Number(form.get("warrantyDays")), providerId: form.get("providerId") ? Number(form.get("providerId")) : null, externalProductId: form.get("externalProductId"), featured: form.has("featured"), active: form.has("active")};
+        const value = {name: form.get("name"), price: Number(form.get("price")), nftokenCredits: Number(form.get("nftokenCredits")), credits: Number(form.get("credits")), category: form.get("category"), description: form.get("description"), imageUrl: form.get("imageUrl"), warrantyDays: form.has("noWarranty") ? 0 : Number(form.get("warrantyDays")), providerId: form.get("providerId") ? Number(form.get("providerId")) : null, externalProductId: form.get("externalProductId"), featured: form.has("featured"), active: form.has("active")};
         try { item ? await api.adminUpdateProduct(item.id, value) : await api.adminCreateProduct(value); close(); await loadAdmin(); toast("Đã lưu sản phẩm"); } catch (error) { toast(`${error.message}${error.reasonCode && error.reasonCode !== "unknown_error" ? ` [${error.reasonCode}]` : ""}`, "error"); }
       };
     }});

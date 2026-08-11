@@ -274,7 +274,8 @@ def claim_free_cookie(user_id):
     c.execute("SELECT id, data FROM free_cookies WHERE is_used=0 LIMIT 1")
     cookie = c.fetchone()
     if cookie:
-        c.execute("UPDATE free_cookies SET is_used=1 WHERE id=?", (cookie[0],))
+        # Cookie Free is borrowed for delivery and returned to reusable stock.
+        c.execute("UPDATE free_cookies SET is_used=0 WHERE id=?", (cookie[0],))
         c.execute("UPDATE usage SET free_cookies_used = free_cookies_used + 1 WHERE user_id=? AND date=?", (user_id, date))
         conn.commit()
         conn.close()
@@ -2549,6 +2550,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     delete_premium_cookie(c_id)
                     continue
                 success, final_token, final_account, final_c_dict = True, token, account, c_dict
+                return_premium_cookie(c_id)
                 break
             else:
                 if not succ or not token or account.get('membership_status') in ('FORMER_MEMBER', 'ON HOLD'):
@@ -3234,6 +3236,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Vui lòng nhập một số hợp lệ lớn hơn 0.")
             return
+        if count != 1 and user_id != ADMIN_ID:
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="❌ Mỗi người chỉ được nhận 1 Cookie trong một lần gửi.")
+            context.user_data['awaiting'] = None
+            return
         bal, cred = get_user_economy(user_id)
         if cred < count and user_id != ADMIN_ID:
             await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Bạn chỉ còn {cred} lượt rút VIP. Vui lòng nạp thêm hoặc giảm số lượng.")
@@ -3259,6 +3265,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             attempts += 1
             if success and token and account.get('membership_status') == 'CURRENT_MEMBER':
                 success_results.append({'cookies': c_dict, 'token': token, 'link': checker.format_nftoken_link(token), 'account': account})
+                return_premium_cookie(c_id)
                 deduct_credits(user_id, 1)
             else:
                 if not success or not token or account.get('membership_status') in ('FORMER_MEMBER', 'ON HOLD'):
