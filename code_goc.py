@@ -17,7 +17,12 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from urllib3.util.retry import Retry
 from requests.adapters import HTTPAdapter
 from urllib.parse import quote
-from account_normalization import decode_escaped_text, normalize_account_payload, normalize_profiles
+from account_normalization import (
+    decode_escaped_text,
+    normalize_account_payload,
+    normalize_membership_status,
+    normalize_profiles,
+)
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DATABASE_PATH = os.getenv('BOT_DATABASE_PATH', os.path.join(APP_DIR, 'bot_database.db'))
@@ -748,7 +753,7 @@ def format_account_card(account: dict, link: str, index: int = 0) -> str:
     phone = normalize_display(account.get('phone', 'N/A'))
     country = normalize_display(account.get('country', 'N/A'))
     currency = normalize_display(account.get('country_currency', ''))
-    status = normalize_display(account.get('membership_status', 'N/A'))
+    status = normalize_membership_status(account.get('membership_status'))
     plan = normalize_display(account.get('plan', 'N/A'))
     plan_price = normalize_display(account.get('plan_price', 'N/A'))
     member_since = normalize_display(account.get('member_since', 'N/A'))
@@ -767,18 +772,17 @@ def format_account_card(account: dict, link: str, index: int = 0) -> str:
             '', 'n/a', 'na', 'none', 'null', 'unknown', 'xx'
         } else value
 
-    status = known_or(status)
+    status = known_or(status, 'Netflix không cung cấp')
     plan = known_or(plan, 'Không lấy được từ Netflix')
     member_since = known_or(member_since, 'Netflix không cung cấp')
     next_billing = known_or(next_billing, 'Netflix không cung cấp')
-    payment_method = known_or(payment_method, 'Không xác định')
-    payment_on_hold = known_or(payment_on_hold, 'Không xác định')
-    video_quality = known_or(video_quality, 'Không xác định')
-    extra_member = known_or(extra_member, 'Không xác định')
+    payment_method = known_or(payment_method, 'Netflix không cung cấp')
+    payment_on_hold = known_or(payment_on_hold, 'Netflix không cung cấp')
+    video_quality = known_or(video_quality, 'Netflix không cung cấp')
+    extra_member = known_or(extra_member, 'Netflix không cung cấp')
     profile_count = known_or(profile_count, str(len(profiles)) if profiles else '0')
 
-    status_map = {'CURRENT_MEMBER': 'Đang hoạt động', 'FORMER_MEMBER': 'Đã hết hạn', 'ON HOLD': 'Tạm dừng'}
-    status_vn = status_map.get(status, status)
+    status_vn = status
 
     if phone == 'N/A': phone = 'Chưa thiết lập'
     if cc_type == 'N/A' and payment_method != 'N/A':
@@ -789,13 +793,13 @@ def format_account_card(account: dict, link: str, index: int = 0) -> str:
             'itunes': 'iTunes', 'applepay': 'Apple Pay', 'googleplay': 'Google Play', 'googlepay': 'Google Pay',
         }
         cc_type = cc_type_map.get(pm_lower, payment_method)
-    elif cc_type == 'N/A': cc_type = 'Không rõ'
+    elif cc_type == 'N/A': cc_type = 'Netflix không cung cấp'
     non_card_types = ('mobilewallet', 'dcb', 'paypal', 'gift', 'giftcard', 'itunes', 'applepay', 'googleplay', 'googlepay')
     if last4 == 'N/A':
         if payment_method != 'N/A' and payment_method.lower() in non_card_types: last4 = 'Không có'
         else: last4 = 'Ẩn'
-    if account_name == 'N/A': account_name = 'Không rõ'
-    if email_masked == 'N/A': email_masked = 'Không rõ'
+    if account_name == 'N/A': account_name = 'Netflix không cung cấp'
+    if email_masked == 'N/A': email_masked = 'Netflix không cung cấp'
 
     profiles_str = ', '.join(profiles) if profiles else 'Không có'
     country_name = country_display_name(country)
@@ -804,7 +808,7 @@ def format_account_card(account: dict, link: str, index: int = 0) -> str:
     if plan_price != 'N/A':
         has_currency = any(c in plan_price for c in '$€£¥₩฿₫₹₱₺₦₪') or any(plan_price.upper().startswith(p) for p in ['THB', 'VND', 'USD', 'EUR', 'GBP', 'ARS', 'CLP', 'COP', 'PEN', 'AED', 'SAR', 'R$', 'C$', 'A$', 'S$', 'HK$', 'NT$', 'RM', 'Rp'])
         price_display = plan_price if has_currency else (f"{currency} {plan_price}" if currency else plan_price)
-    else: price_display = 'Không rõ'
+    else: price_display = 'Netflix không cung cấp'
 
     return (
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -1229,12 +1233,129 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
 
         return results
 
+    def _context_value(self, value: Any) -> Any:
+        value = self._unwrap_falcor(value)
+        if isinstance(value, dict):
+            for key in (
+                "value", "displayValue", "formattedPrice", "localizedName", "name",
+                "text", "label", "price",
+            ):
+                if key in value and isinstance(value[key], (str, int, float, bool)):
+                    return value[key]
+        return value
+
+    def _parse_billing_context(self, ctx: dict, info: dict):
+        """Parse the nested billing/userInfo shape returned by Shakti pathEvaluator."""
+        if not isinstance(ctx, dict):
+            return
+
+        containers = [ctx]
+        for key in ("jsonGraph", "billing", "account", "userInfo"):
+            value = ctx.get(key)
+            if isinstance(value, dict):
+                containers.append(value)
+
+        payment_objects = []
+        plan_objects = []
+        for container in list(containers):
+            for key in ("billing", "account", "subscription"):
+                nested = container.get(key) if isinstance(container, dict) else None
+                if isinstance(nested, dict):
+                    containers.append(nested)
+            if isinstance(container, dict):
+                for key in ("currentPaymentMethod", "paymentMethod", "currentMop", "mop"):
+                    payment = container.get(key)
+                    if isinstance(payment, dict):
+                        payment_objects.append(payment)
+                for key in ("currentPlan", "plan", "subscriptionPlan"):
+                    plan = container.get(key)
+                    if isinstance(plan, dict):
+                        plan_objects.append(plan)
+
+        def first_value(objects, keys):
+            for obj in objects:
+                for key in keys:
+                    if key not in obj:
+                        continue
+                    value = self._context_value(obj[key])
+                    if isinstance(value, (str, int, float, bool)) and str(value).strip():
+                        return value
+            return None
+
+        payment_type = first_value(
+            payment_objects,
+            ("type", "paymentType", "mopType", "method", "paymentMethodType", "billingType"),
+        )
+        card_type = first_value(
+            payment_objects,
+            ("cardType", "cardBrand", "cardIssuer", "issuer", "mopName", "mopDisplayName", "displayName"),
+        )
+        last4 = first_value(
+            payment_objects,
+            ("lastFourDigits", "last4", "cardLastFourDigits", "mopLastFour", "last4Digits"),
+        )
+        if payment_type is not None and info.get("payment_method") == "N/A":
+            info["payment_method"] = str(payment_type)
+        if card_type is not None and info.get("cc_type") == "N/A":
+            info["cc_type"] = str(card_type)
+        if last4 is not None and info.get("last4") == "N/A":
+            info["last4"] = str(last4)
+
+        plan = first_value(
+            plan_objects,
+            ("localizedPlanName", "planName", "displayName", "name"),
+        )
+        plan_price = first_value(
+            plan_objects,
+            ("formattedPrice", "retailPrice", "planPrice", "price", "localizedPrice"),
+        )
+        quality = first_value(plan_objects, ("videoQuality", "planVideoQuality", "maxResolution"))
+        streams = first_value(plan_objects, ("maxStreams", "numOfDevices", "concurrentStreams"))
+        extras = first_value(plan_objects, ("extraMemberSlots", "extraMembers"))
+        if plan is not None and info.get("plan") == "N/A":
+            info["plan"] = str(plan)
+        if plan_price is not None and info.get("plan_price") == "N/A":
+            info["plan_price"] = str(plan_price)
+        if quality is not None and info.get("video_quality") == "N/A":
+            info["video_quality"] = str(quality)
+        if streams is not None and info.get("max_streams") == "N/A":
+            info["max_streams"] = str(streams)
+        if extras is not None and info.get("extra_member_slots") == "N/A":
+            info["extra_member_slots"] = str(extras)
+
+        for container in containers:
+            if not isinstance(container, dict):
+                continue
+            user_info = container.get("userInfo")
+            if isinstance(user_info, dict):
+                first_name = self._context_value(
+                    user_info.get("firstName") or user_info.get("displayName")
+                )
+                if first_name:
+                    info["_account_name_candidates"].append(first_name)
+                    if info.get("account_name") == "N/A":
+                        info["account_name"] = str(first_name)
+            status = self._context_value(container.get("membershipStatus"))
+            if status and info.get("membership_status") == "N/A":
+                info["membership_status"] = str(status)
+            next_billing = self._context_value(
+                container.get("nextBillingDate") or container.get("nextRenewalDate")
+            )
+            if next_billing and info.get("next_billing") == "N/A":
+                info["next_billing"] = self._format_timestamp(str(next_billing))
+            member_since = self._context_value(
+                container.get("memberSince") or container.get("membershipStartDate")
+            )
+            if member_since and info.get("member_since") == "N/A":
+                info["member_since"] = self._format_timestamp(str(member_since))
+
     def _parse_account_from_context(self, ctx: dict, info: dict):
         """Parse account info from reactContext or any Netflix JSON structure."""
         if not ctx:
             return
 
         info.setdefault('_account_name_candidates', [])
+        self._parse_billing_context(ctx, info)
 
         models = ctx.get('models', {})
         if isinstance(models, dict):
@@ -1844,6 +1965,13 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
                                 request_timeout=request_timeout,
                                 deadline=deadline,
                             )
+                            # Netflix only returns createAutoLoginToken for a live
+                            # member session. Preserve that verified fact when the
+                            # optional profile/account page omits membershipStatus.
+                            if str(account_info.get("membership_status", "")).strip().upper() in {
+                                "", "N/A", "UNKNOWN", "NONE", "NULL"
+                            }:
+                                account_info["membership_status"] = "CURRENT_MEMBER"
                             return True, token, None, account_info
                         elif 'errors' in data:
                             errors = data.get('errors', [])

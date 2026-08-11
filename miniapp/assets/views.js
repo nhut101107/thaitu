@@ -1,6 +1,6 @@
-import {api} from "./api.js?v=12";
+import {api} from "./api.js?v=13";
 import {state, update} from "./state.js";
-import {emptyState, escapeHtml, formatMoney, icon, modal, productCard, skeleton, toast} from "./components.js?v=12";
+import {emptyState, escapeHtml, formatMoney, icon, modal, productCard, skeleton, toast} from "./components.js?v=13";
 
 function section(title, body, action = "") {
   return `<section class="content-section"><div class="section-title"><div><small>Shop MMO</small><h2>${title}</h2></div>${action}</div>${body}</section>`;
@@ -129,7 +129,7 @@ function busyButton(button, text = "Đang xử lý...") {
 }
 
 function legacyAccountSummary(account = {}) {
-  return `<dl><div><dt>Email</dt><dd>${escapeHtml(account.email || "Không rõ")}</dd></div><div><dt>Gói</dt><dd>${escapeHtml(account.plan || "Không rõ")}</dd></div><div><dt>Quốc gia</dt><dd>${escapeHtml(account.country || "Không rõ")}</dd></div><div><dt>Trạng thái</dt><dd>${escapeHtml(account.status || "Không rõ")}</dd></div></dl>`;
+  return `<dl><div><dt>Email</dt><dd>${escapeHtml(account.email || "Netflix không cung cấp")}</dd></div><div><dt>Gói</dt><dd>${escapeHtml(account.plan || "Netflix không cung cấp")}</dd></div><div><dt>Quốc gia</dt><dd>${escapeHtml(account.country || "Netflix không cung cấp")}</dd></div><div><dt>Trạng thái</dt><dd>${escapeHtml(account.status || "Netflix không cung cấp")}</dd></div></dl>`;
 }
 
 function accountSummary(account = {}) {
@@ -141,7 +141,7 @@ function accountSummary(account = {}) {
         {label: "Quốc gia", value: account.country},
         {label: "Trạng thái", value: account.status},
       ];
-  return `<section class="account-summary"><div class="account-summary-head"><b>Thông tin tài khoản</b><small>Credential nhạy cảm đã được ẩn</small></div><div class="account-detail-grid">${rows.map((row) => `<div class="account-detail"><span>${escapeHtml(row.label || "Thông tin")}</span><strong>${escapeHtml(row.value || "Không rõ")}</strong></div>`).join("")}</div></section>`;
+  return `<section class="account-summary"><div class="account-summary-head"><b>Thông tin tài khoản</b><small>Credential nhạy cảm đã được ẩn</small></div><div class="account-detail-grid">${rows.map((row) => `<div class="account-detail"><span>${escapeHtml(row.label || "Thông tin")}</span><strong>${escapeHtml(row.value || "Netflix không cung cấp")}</strong></div>`).join("")}</div></section>`;
 }
 
 export function openNftoken(mode = "plan") {

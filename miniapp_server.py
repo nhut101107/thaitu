@@ -21,7 +21,7 @@ from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 from flask import Flask, Response, g, jsonify, request, send_from_directory
-from account_normalization import normalize_account_payload
+from account_normalization import normalize_account_payload, normalize_membership_status
 from product_providers import ProviderError, provider_from_row
 from advanced_features import (
     APP_TZ, csv_bytes, flash_price, local_now, mask_user_id, normalize_language,
@@ -1027,13 +1027,13 @@ def run_tv_login(cookie_data, tv_code):
 
 def legacy_public_account(account):
     return {
-        "name": account.get("account_name", "Không rõ"),
-        "email": account.get("email_masked", "Không rõ"),
-        "plan": account.get("plan", "Không rõ"),
-        "country": account.get("country", "Không rõ"),
-        "status": account.get("membership_status", "Không rõ"),
-        "quality": account.get("video_quality", "Không rõ"),
-        "profiles": account.get("profile_count", "Không rõ"),
+        "name": account.get("account_name", "Netflix không cung cấp"),
+        "email": account.get("email_masked", "Netflix không cung cấp"),
+        "plan": account.get("plan", "Netflix không cung cấp"),
+        "country": account.get("country", "Netflix không cung cấp"),
+        "status": normalize_membership_status(account.get("membership_status")),
+        "quality": account.get("video_quality", "Netflix không cung cấp"),
+        "profiles": account.get("profile_count", "Không có profile"),
     }
 
 
@@ -1062,9 +1062,9 @@ def public_account(account):
             repaired = candidate
         return repaired
 
-    def value(key, fallback="Không rõ"):
+    def value(key, fallback="Netflix không cung cấp"):
         raw = account.get(key, fallback)
-        if raw is None or raw == "" or raw == "N/A":
+        if raw is None or raw == "" or str(raw).strip().casefold() in {"n/a", "na", "none", "null", "unknown", "xx"}:
             return fallback
         if isinstance(raw, (dict, list)):
             return ", ".join(str(item) for item in raw) if isinstance(raw, list) else str(raw)
@@ -1077,7 +1077,7 @@ def public_account(account):
         ("Số điện thoại", value("phone")),
         ("Quốc gia", value("country")),
         ("Tiền tệ", value("country_currency")),
-        ("Trạng thái", value("membership_status")),
+        ("Trạng thái", normalize_membership_status(account.get("membership_status"))),
         ("Gói cước", value("plan")),
         ("Giá gói", value("plan_price")),
         ("Ngày tham gia", value("member_since")),
@@ -1091,14 +1091,14 @@ def public_account(account):
         ("Extra Member", value("extra_member")),
         ("Số slot Extra Member", value("extra_member_slots")),
         ("Số profile", value("profile_count", str(len(profiles)))),
-        ("Profiles", ", ".join(str(item) for item in profiles) if profiles else "Không rõ"),
+        ("Profiles", ", ".join(str(item) for item in profiles) if profiles else "Không có profile"),
     ]
     return {
         "name": value("account_name"),
         "email": value("email_masked"),
         "plan": value("plan"),
         "country": value("country"),
-        "status": value("membership_status"),
+        "status": normalize_membership_status(account.get("membership_status")),
         "quality": value("video_quality"),
         "profiles": value("profile_count", str(len(profiles))),
         "details": [{"label": label, "value": item} for label, item in details],

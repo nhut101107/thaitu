@@ -3,6 +3,7 @@
 import html
 import json
 import re
+import unicodedata
 from typing import Any
 
 
@@ -36,6 +37,24 @@ COUNTRY_ALIASES = {
     "JP": {"jp", "japan", "nhật bản"},
     "KR": {"kr", "korea", "south korea", "hàn quốc"},
 }
+
+
+STATUS_LABELS = {
+    "CURRENT_MEMBER": "Đang hoạt động",
+    "FORMER_MEMBER": "Đã hết hạn",
+    "ON HOLD": "Tạm giữ thanh toán",
+    "ON_HOLD": "Tạm giữ thanh toán",
+    "ACTIVE": "Đang hoạt động",
+    "INACTIVE": "Không hoạt động",
+    "CANCELLED": "Đã hủy",
+    "CANCELED": "Đã hủy",
+}
+
+
+def _fold_text(value: Any) -> str:
+    text = decode_escaped_text(value)
+    text = unicodedata.normalize("NFKD", text)
+    return "".join(char for char in text if not unicodedata.combining(char)).casefold().strip()
 
 
 def _repair_mojibake(text: str) -> str:
@@ -140,27 +159,72 @@ def normalize_payment_method(value: Any) -> str:
     return raw if len(raw) > 3 or " " in raw else "Không rõ"
 
 
+def normalize_membership_status(value: Any) -> str:
+    raw = decode_escaped_text(value)
+    if not raw or raw.casefold() in UNKNOWN_VALUES:
+        return "Netflix không cung cấp"
+    key = re.sub(r"[\s-]+", "_", raw.upper()).strip("_")
+    return STATUS_LABELS.get(key, raw)
+
+
 def _name_candidates(account: dict) -> list[str]:
-    candidates = list(account.get("_account_name_candidates") or [])
+    candidates = []
     for key in NAME_FIELDS:
         candidates.append(account.get(key))
     user_info = account.get("userInfo")
     if isinstance(user_info, dict):
+        for key in NAME_FIELDS:
+            candidates.append(user_info.get(key))
         candidates.append(user_info.get("firstName"))
+    candidates.extend(account.get("_account_name_candidates") or [])
     candidates.append(account.get("account_name"))
-    return [decode_escaped_text(value) for value in candidates if decode_escaped_text(value)]
+    result = []
+    for value in candidates:
+        decoded = decode_escaped_text(value)
+        if decoded and decoded not in result:
+            result.append(decoded)
+    return result
 
 
 def _is_country_name(candidate: str, country: Any) -> bool:
-    candidate_key = candidate.casefold()
-    country_text = decode_escaped_text(country).casefold()
+    candidate_key = _fold_text(candidate)
+    country_text = _fold_text(country)
     if country_text and candidate_key == country_text:
         return True
     country_code = country_text.upper()
-    aliases = COUNTRY_ALIASES.get(country_code, set())
+    aliases = {_fold_text(alias) for alias in COUNTRY_ALIASES.get(country_code, set())}
     if candidate_key in aliases:
         return True
-    return any(candidate_key in alias_set and country_text in alias_set for alias_set in COUNTRY_ALIASES.values())
+    all_aliases = {
+        _fold_text(alias)
+        for alias_set in COUNTRY_ALIASES.values()
+        for alias in alias_set
+    }
+    all_aliases.update(_fold_text(name) for name in {
+        "Malaysia", "Indonesia", "Singapore", "Philippines", "India", "Australia",
+        "Canada", "Germany", "France", "Italy", "Spain", "Netherlands", "Turkey",
+    })
+    return candidate_key in all_aliases
+
+
+def _is_non_name_value(candidate: str, account: dict) -> bool:
+    candidate_key = _fold_text(candidate)
+    if not candidate_key:
+        return True
+    if _is_country_name(candidate, account.get("country")):
+        return True
+    for field in (
+        "country_currency", "currency", "locale", "preferredLocale", "userLocale",
+        "plan", "membership_status", "payment_method", "cc_type", "video_quality",
+    ):
+        raw = account.get(field)
+        if raw not in (None, "") and candidate_key == _fold_text(raw):
+            return True
+    return candidate_key in {
+        "n/a", "na", "none", "null", "unknown", "xx", "current_member",
+        "former_member", "on_hold", "active", "inactive", "rm", "usd", "eur",
+        "vnd", "premium", "standard", "basic", "mobile",
+    }
 
 
 def normalize_account_payload(account: dict) -> dict:
@@ -168,7 +232,8 @@ def normalize_account_payload(account: dict) -> dict:
     normalized = dict(account or {})
     country = decode_escaped_text(normalized.get("country"))
     name = next(
-        (candidate for candidate in _name_candidates(normalized) if not _is_country_name(candidate, country)),
+        (candidate for candidate in _name_candidates(normalized)
+         if not _is_non_name_value(candidate, normalized)),
         "N/A",
     )
     normalized["account_name"] = name
@@ -184,6 +249,9 @@ def normalize_account_payload(account: dict) -> dict:
         card = payment
     normalized["payment_method"] = payment
     normalized["cc_type"] = card
+    normalized["membership_status_label"] = normalize_membership_status(
+        normalized.get("membership_status")
+    )
     normalized["last4"] = decode_escaped_text(normalized.get("last4")) or "N/A"
     if payment in {"Thanh toán nhà mạng (DCB)", "PayPal", "Gift Card", "iTunes", "Google Play", "Google Pay"}:
         normalized["last4"] = "Không có"

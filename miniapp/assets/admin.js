@@ -1,6 +1,6 @@
-import {api} from "./api.js?v=12";
+import {api} from "./api.js?v=13";
 import {state, update} from "./state.js";
-import {emptyState, escapeHtml, formatMoney, modal, skeleton, toast} from "./components.js?v=12";
+import {emptyState, escapeHtml, formatMoney, modal, skeleton, toast} from "./components.js?v=13";
 
 export async function loadAdmin(query = "") {
   try {
