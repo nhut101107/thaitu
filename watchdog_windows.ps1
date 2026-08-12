@@ -20,8 +20,10 @@ function Test-RecordedProcess([string]$PidFile, [string]$ExpectedCommand) {
     if (-not (Test-Path -LiteralPath $PidFile)) { return $false }
     $value = (Get-Content -Raw -LiteralPath $PidFile).Trim()
     if ($value -notmatch '^\d+$') { return $false }
-    $process = Get-CimInstance Win32_Process -Filter "ProcessId=$value" -ErrorAction SilentlyContinue
-    return $null -ne $process -and $process.CommandLine -match [regex]::Escape($ExpectedCommand)
+    $process = Get-Process -Id ([int]$value) -ErrorAction SilentlyContinue
+    if (-not $process) { return $false }
+    $expectedName = if ($ExpectedCommand -eq "cloudflared.exe") { "cloudflared" } else { "python" }
+    return $process.ProcessName -eq $expectedName
 }
 
 function Start-AppProcess([string]$Script, [string]$Name) {
@@ -78,8 +80,8 @@ function Start-Cloudflare {
         if (Test-Path -LiteralPath $botPidFile) {
             $botValue = (Get-Content -Raw -LiteralPath $botPidFile).Trim()
             if ($botValue -match '^\d+$') {
-                $botProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$botValue" -ErrorAction SilentlyContinue
-                if ($botProcess -and $botProcess.CommandLine -match 'code_goc\.py') {
+                $botProcess = Get-Process -Id ([int]$botValue) -ErrorAction SilentlyContinue
+                if ($botProcess -and $botProcess.ProcessName -eq 'python') {
                     Stop-Process -Id ([int]$botValue) -Force
                 }
             }

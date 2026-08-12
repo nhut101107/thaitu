@@ -57,9 +57,11 @@ function Get-RecordedAppProcess([string]$PidFile, [string]$ExpectedCommand) {
     if (-not (Test-Path -LiteralPath $PidFile)) { return $null }
     $value = (Get-Content -Raw -LiteralPath $PidFile).Trim()
     if ($value -notmatch '^\d+$') { return $null }
-    $recorded = Get-CimInstance Win32_Process -Filter "ProcessId=$value" -ErrorAction SilentlyContinue
-    if (-not $recorded -or $recorded.CommandLine -notmatch [regex]::Escape($ExpectedCommand)) { return $null }
-    return Get-Process -Id ([int]$value) -ErrorAction SilentlyContinue
+    $recorded = Get-Process -Id ([int]$value) -ErrorAction SilentlyContinue
+    if (-not $recorded) { return $null }
+    $expectedName = if ($ExpectedCommand -eq "cloudflared.exe") { "cloudflared" } else { "python" }
+    if ($recorded.ProcessName -ne $expectedName) { return $null }
+    return $recorded
 }
 
 $mini = Get-RecordedAppProcess (Join-Path $LogDir "miniapp.pid") "miniapp_server.py"
