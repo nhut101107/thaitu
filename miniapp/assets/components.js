@@ -1,8 +1,9 @@
 import {state} from "./state.js";
-import {translateDom} from "./i18n.js";
+import {isEnglish, translateDom, translateText} from "./i18n.js?v=2";
 
-const money = new Intl.NumberFormat("vi-VN");
-export const formatMoney = (value) => `${money.format(Number(value || 0))} ₫`;
+const moneyVi = new Intl.NumberFormat("vi-VN");
+const moneyEn = new Intl.NumberFormat("en-US");
+export const formatMoney = (value) => `${(isEnglish() ? moneyEn : moneyVi).format(Number(value || 0))} ₫`;
 export const escapeHtml = (value = "") => String(value).replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 
 export function icon(name) {
@@ -54,7 +55,7 @@ export function toast(message, kind = "success") {
   const root = document.querySelector("#toast-root");
   const node = document.createElement("div");
   node.className = `toast ${kind}`;
-  node.textContent = message;
+  node.textContent = translateText(message);
   root.append(node);
   setTimeout(() => node.remove(), 2800);
 }

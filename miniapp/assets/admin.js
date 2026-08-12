@@ -1,6 +1,7 @@
-import {api} from "./api.js?v=17";
+import {api} from "./api.js?v=18";
 import {state, update} from "./state.js";
-import {emptyState, escapeHtml, formatMoney, modal, skeleton, toast} from "./components.js?v=17";
+import {emptyState, escapeHtml, formatMoney, modal, skeleton, toast} from "./components.js?v=18";
+import {translateText} from "./i18n.js?v=2";
 
 export async function loadAdmin(query = "") {
   try {
@@ -239,7 +240,7 @@ export function bindAdminEvents() {
   document.querySelectorAll("[data-admin-product-image]").forEach((image) => image.addEventListener("error", () => { image.hidden = true; image.nextElementSibling.hidden = false; }));
   document.querySelectorAll("[data-admin-product-delete]").forEach((button) => button.onclick = async () => {
     const item = state.admin.products.find((product) => product.id === Number(button.dataset.adminProductDelete));
-    if (!item || !confirm(`Xóa sản phẩm “${item.name}”? Sản phẩm đã có đơn sẽ được ẩn để giữ lịch sử.`)) return;
+    if (!item || !confirm(translateText(`Xóa sản phẩm “${item.name}”? Sản phẩm đã có đơn sẽ được ẩn để giữ lịch sử.`))) return;
     const restore = busyButton(button, "...");
     try { const result = await api.adminDeleteProduct(item.id); await loadAdmin(); toast(result.archived ? result.message : "Đã xóa sản phẩm"); }
     catch (error) { toast(`${error.message}${error.reasonCode && error.reasonCode !== "unknown_error" ? ` [${error.reasonCode}]` : ""}`, "error"); }
@@ -256,6 +257,6 @@ export function bindAdminEvents() {
   document.querySelectorAll("[data-admin-reply]").forEach((button) => button.onclick = () => replyDialog(state.admin.tickets.find((ticket) => ticket.id === Number(button.dataset.adminReply))));
   document.querySelector("[data-admin-settings]")?.addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); const features = {}; ["tv","planToken","vipToken","freeCookie","giftcode","deposit","support"].forEach((key) => { features[key] = form.has(`feature_${key}`); }); const trial = {nftokenEnabled: form.has("trial_nftoken_enabled"), nftokenDailyLimit: Number(form.get("trial_nftoken_limit")), cookieEnabled: form.has("trial_cookie_enabled"), cookieDailyLimit: Number(form.get("trial_cookie_limit"))}; try { await api.adminSaveSettings({maintenance: form.has("maintenance"), announcement: form.get("announcement"), features, trial}); await loadAdmin(); toast("Đã lưu cấu hình hệ thống"); } catch (error) { toast(error.message, "error"); } });
   document.querySelectorAll("[data-admin-inventory]").forEach((button) => button.onclick = () => inventoryDialog(button.dataset.adminInventory));
-  document.querySelectorAll("[data-admin-cleanup]").forEach((button) => button.onclick = async () => { if (!confirm("Chỉ xóa các mục đã dùng, tiếp tục?")) return; try { const result = await api.adminCleanupInventory(button.dataset.adminCleanup); await loadAdmin(); toast(`Đã dọn ${result.deleted} mục đã dùng`); } catch (error) { toast(error.message, "error"); } });
+  document.querySelectorAll("[data-admin-cleanup]").forEach((button) => button.onclick = async () => { if (!confirm(translateText("Chỉ xóa các mục đã dùng, tiếp tục?"))) return; try { const result = await api.adminCleanupInventory(button.dataset.adminCleanup); await loadAdmin(); toast(`Đã dọn ${result.deleted} mục đã dùng`); } catch (error) { toast(error.message, "error"); } });
   document.querySelectorAll("[data-admin-order]").forEach((button) => button.onclick = () => orderDialog(state.admin.orders.find((order) => order.id === Number(button.dataset.adminOrder))));
 }

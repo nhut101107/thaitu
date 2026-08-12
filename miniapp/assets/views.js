@@ -1,6 +1,6 @@
-import {api} from "./api.js?v=17";
+import {api} from "./api.js?v=18";
 import {state, update} from "./state.js";
-import {copyText, emptyState, escapeHtml, formatMoney, icon, modal, productCard, skeleton, toast} from "./components.js?v=17";
+import {copyText, emptyState, escapeHtml, formatMoney, icon, modal, productCard, skeleton, toast} from "./components.js?v=18";
 
 function section(title, body, action = "") {
   return `<section class="content-section"><div class="section-title"><div><small>Shop MMO</small><h2>${title}</h2></div>${action}</div>${body}</section>`;

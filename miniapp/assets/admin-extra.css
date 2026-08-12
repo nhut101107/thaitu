@@ -13,7 +13,47 @@
   font-size: 10px;
   transition: background 0.2s;
 }
-.trial-settings{margin:16px 0;padding:15px;border:1px solid var(--line);border-radius:16px;background:#151517}.trial-settings h3{margin:0 0 5px;font-size:14px}.trial-settings>p{margin:0 0 14px;color:var(--muted);font-size:10px;line-height:1.45}.trial-toggle{display:flex;align-items:center;gap:10px;margin:11px 0;padding:12px;border:1px solid var(--line);border-radius:13px;background:#1c1c1f}.trial-toggle input{width:20px;height:20px;accent-color:#f4f4f5}.trial-toggle span{min-width:0}.trial-toggle b,.trial-toggle small{display:block}.trial-toggle small{margin-top:4px;color:var(--muted);font-size:9px}
+.trial-settings{margin:16px 0;padding:15px;border:1px solid var(--line);border-radius:16px;background:#151517}.trial-settings h3{margin:0 0 5px;font-size:14px}.trial-settings>p{margin:0 0 14px;color:var(--muted);font-size:10px;line-height:1.45}.trial-toggle{display:flex;align-items:center;gap:10px;margin:11px 0;padding:12px;border:1px solid var(--line);border-radius:13px;background:#1c1c1f}.trial-toggle span{min-width:0}.trial-toggle b,.trial-toggle small{display:block}.trial-toggle small{margin-top:4px;color:var(--muted);font-size:9px}
+
+/* Monochrome custom checks: native accent colors were unreadable on dark cards. */
+.admin-page input[type="checkbox"],
+.modal-sheet input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  margin: 0 7px 0 0;
+  border: 1.5px solid #71717a;
+  border-radius: 6px;
+  background: #09090b;
+  display: inline-grid;
+  place-content: center;
+  vertical-align: middle;
+  cursor: pointer;
+  transition: background .15s, border-color .15s, box-shadow .15s;
+}
+.admin-page input[type="checkbox"]::after,
+.modal-sheet input[type="checkbox"]::after {
+  content: "";
+  width: 5px;
+  height: 9px;
+  border-right: 2px solid #09090b;
+  border-bottom: 2px solid #09090b;
+  transform: rotate(45deg) scale(0);
+  transition: transform .12s ease-out;
+}
+.admin-page input[type="checkbox"]:checked,
+.modal-sheet input[type="checkbox"]:checked {
+  border-color: #fafafa;
+  background: #fafafa;
+}
+.admin-page input[type="checkbox"]:checked::after,
+.modal-sheet input[type="checkbox"]:checked::after { transform: rotate(45deg) scale(1); }
+.admin-page input[type="checkbox"]:focus-visible,
+.modal-sheet input[type="checkbox"]:focus-visible { outline: 0; box-shadow: 0 0 0 3px rgba(250,250,250,.2); }
+.admin-page input[type="checkbox"]:disabled,
+.modal-sheet input[type="checkbox"]:disabled { opacity: .45; cursor: not-allowed; }
 .inventory-cards {
   display: grid;
   grid-template-columns: 1fr 1fr;

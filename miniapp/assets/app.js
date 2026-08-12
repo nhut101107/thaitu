@@ -1,9 +1,9 @@
-import {api} from "./api.js?v=17";
+import {api} from "./api.js?v=18";
 import {state, subscribe, update} from "./state.js";
-import {bottomNav, header, toast} from "./components.js?v=17";
-import {accountView, addToCart, claimFreeCookie, homeView, openCart, openCheckin, openDeposit, openGiftcode, openHelp, openMissions, openNftoken, openNotifications, openOrder, openProduct, openReferral, openSupport, openTvLogin, ordersView, storeView, toolsView} from "./views.js?v=17";
-import {adminView, bindAdminEvents, loadAdmin} from "./admin.js?v=17";
-import {translateDom} from "./i18n.js";
+import {bottomNav, header, toast} from "./components.js?v=18";
+import {accountView, addToCart, claimFreeCookie, homeView, openCart, openCheckin, openDeposit, openGiftcode, openHelp, openMissions, openNftoken, openNotifications, openOrder, openProduct, openReferral, openSupport, openTvLogin, ordersView, storeView, toolsView} from "./views.js?v=18";
+import {adminView, bindAdminEvents, loadAdmin} from "./admin.js?v=18";
+import {translateDom, translateText} from "./i18n.js?v=2";
 
 const tg = window.Telegram?.WebApp;
 const app = document.querySelector("#app");
@@ -126,7 +126,7 @@ async function boot() {
     loading.classList.add("fade-out");
     setTimeout(() => { loading.classList.add("hidden"); app.classList.remove("hidden"); render(); }, 220);
   } catch (error) {
-    message.textContent = error.message;
+    message.textContent = translateText(error.message);
     retry.classList.remove("hidden");
     retry.onclick = boot;
   }

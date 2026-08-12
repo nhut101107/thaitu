@@ -1,4 +1,4 @@
-const CACHE_VERSION = "shop-mmo-static-v5";
+const CACHE_VERSION = "shop-mmo-static-v6";
 const STATIC_ASSETS = [
   "/",
   "/manifest.json",
@@ -6,13 +6,13 @@ const STATIC_ASSETS = [
   "/assets/modern.css?v=1",
   "/assets/tools.css?v=4",
   "/assets/theme.css?v=2",
-  "/assets/app.js?v=17",
-  "/assets/api.js?v=17",
+  "/assets/app.js?v=18",
+  "/assets/api.js?v=18",
   "/assets/state.js",
-  "/assets/i18n.js",
-  "/assets/components.js?v=17",
-  "/assets/views.js?v=17",
-  "/assets/admin.js?v=17",
+  "/assets/i18n.js?v=2",
+  "/assets/components.js?v=18",
+  "/assets/views.js?v=18",
+  "/assets/admin.js?v=18",
 ];
 
 self.addEventListener("install", (event) => {
