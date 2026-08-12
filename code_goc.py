@@ -1273,6 +1273,46 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
                     return value[key]
         return value
 
+    def _trusted_account_name_candidates(self, ctx: Any) -> list:
+        """Read owner names only from explicit account/userInfo containers."""
+        candidates = []
+        trusted_containers = {
+            "userinfo", "accountowner", "accountinfo", "memberinfo",
+            "customerinfo", "subscriberinfo",
+        }
+        blocked_containers = {
+            "profile", "profiles", "allprofiles", "avatars", "characters",
+        }
+
+        def append(value):
+            value = self._context_value(value)
+            if isinstance(value, (str, int, float)):
+                text = str(value).strip()
+                if text and text not in candidates:
+                    candidates.append(text)
+
+        def walk(value, depth=0):
+            value = self._unwrap_falcor(value)
+            if depth > 16 or not isinstance(value, (dict, list)):
+                return
+            if isinstance(value, list):
+                for item in value:
+                    walk(item, depth + 1)
+                return
+            for key, child in value.items():
+                key_name = re.sub(r"[^a-z]", "", str(key).casefold())
+                if key_name in blocked_containers:
+                    continue
+                unwrapped = self._unwrap_falcor(child)
+                if key_name in trusted_containers and isinstance(unwrapped, dict):
+                    for name_key in ("firstName", "accountName", "displayName"):
+                        if name_key in unwrapped:
+                            append(unwrapped[name_key])
+                walk(child, depth + 1)
+
+        walk(ctx)
+        return candidates
+
     def _parse_billing_context(self, ctx: dict, info: dict):
         """Parse the nested billing/userInfo shape returned by Shakti pathEvaluator."""
         if not isinstance(ctx, dict):
@@ -1384,6 +1424,11 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
             return
 
         info.setdefault('_account_name_candidates', [])
+        for candidate in self._trusted_account_name_candidates(ctx):
+            if candidate not in info['_account_name_candidates']:
+                info['_account_name_candidates'].append(candidate)
+            if info.get('account_name') == 'N/A':
+                info['account_name'] = candidate
         self._parse_billing_context(ctx, info)
 
         models = ctx.get('models', {})
@@ -1393,7 +1438,6 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
                 if isinstance(inner, dict):
                     for field, targets in [
                         ('emailAddress', 'email'), ('email', 'email'),
-                        ('firstName', 'account_name'), ('displayName', 'account_name'),
                         ('phoneNumber', 'phone'), ('contactPhoneNumber', 'phone'),
                         ('formattedPhoneNumber', 'phone'),
                         ('membershipStatus', 'membership_status'),
@@ -1416,8 +1460,6 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
                     ]:
                         if field in inner and info.get(targets, 'N/A') == 'N/A':
                             raw_val = self._unwrap_falcor(inner[field])
-                            if targets == 'account_name' and raw_val:
-                                info['_account_name_candidates'].append(raw_val)
                             if raw_val and (isinstance(raw_val, (str, int, float)) or
                                              (targets == 'country' and isinstance(raw_val, dict))):
                                 val = str(raw_val)
@@ -1438,7 +1480,7 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
 
         search_keys = [
             'membershipStatus', 'countryOfSignup', 'currentCountry', 'signupCountry',
-            'emailAddress', 'email', 'firstName', 'displayName', 'accountName',
+            'emailAddress', 'email',
             'phoneNumber', 'phone', 'mobileNumber', 'contactPhoneNumber',
             'formattedPhoneNumber', 'telephoneNumber',
             'localizedPlanName', 'planName', 'currentPlan', 'planDisplayName',
@@ -1467,14 +1509,6 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
             if val and isinstance(val, str) and '@' in val and info['email'] == 'N/A':
                 info['email'] = val
                 info['email_masked'] = self._mask_email(val)
-                break
-
-        for key in ['firstName', 'displayName', 'accountName']:
-            val = found.get(key)
-            if val:
-                info['_account_name_candidates'].append(val)
-            if val and isinstance(val, str) and info['account_name'] == 'N/A':
-                info['account_name'] = val
                 break
 
         for key in ['phoneNumber', 'phone', 'mobileNumber', 'contactPhoneNumber',
@@ -1608,10 +1642,19 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
                 info['email_masked'] = self._mask_email(m.group(1))
 
         if info['account_name'] == 'N/A':
-            m = re.search(r'"(?:firstName|displayName|accountName)"\s*:\s*"([^"]{1,50})"', html)
-            if m:
-                info.setdefault('_account_name_candidates', []).append(m.group(1))
-                info['account_name'] = m.group(1)
+            # Context-bound fallback only. A global firstName/displayName
+            # regex commonly captures a profile or localized country label.
+            patterns = [
+                r'"(?:userInfo|accountOwner|accountInfo)"\s*:\s*\{.{0,2500}?"(?:firstName|accountName|displayName)"\s*:\s*"([^"]{1,80})"',
+                r'"(?:userInfo|accountOwner|accountInfo)"\s*:\s*\{.{0,2500}?"(?:firstName|accountName|displayName)"\s*:\s*\{[^{}]{0,500}?"value"\s*:\s*"([^"]{1,80})"',
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, html, re.DOTALL)
+                if not match:
+                    continue
+                info.setdefault('_account_name_candidates', []).append(match.group(1))
+                info['account_name'] = match.group(1)
+                break
 
         if info['phone'] == 'N/A':
             m = re.search(r'"(?:phoneNumber|phone|mobileNumber|contactPhoneNumber|formattedPhoneNumber|telephoneNumber)"\s*:\s*"([^"]+)"', html)

@@ -8,7 +8,7 @@ from typing import Any
 
 
 UNKNOWN_VALUES = {"", "n/a", "na", "none", "null", "unknown", "xx"}
-NAME_FIELDS = ("firstName", "displayName", "accountName", "profileName")
+NAME_FIELDS = ("firstName", "accountName", "displayName", "profileName")
 PAYMENT_LABELS = {
     "DC": "Thanh toán nhà mạng (DCB)",
     "DCB": "Thanh toán nhà mạng (DCB)",
@@ -207,14 +207,16 @@ def normalize_stream_limit(plan: Any, current: Any = "") -> str:
 
 def _name_candidates(account: dict) -> list[str]:
     candidates = []
-    for key in NAME_FIELDS:
-        candidates.append(account.get(key))
+    # Prefer provenance-aware values collected from explicit Netflix
+    # account-owner/userInfo containers. Generic displayName/firstName fields
+    # are also used for profiles, country selectors and UI labels.
+    candidates.extend(account.get("_account_name_candidates") or [])
     user_info = account.get("userInfo")
     if isinstance(user_info, dict):
         for key in NAME_FIELDS:
             candidates.append(user_info.get(key))
-        candidates.append(user_info.get("firstName"))
-    candidates.extend(account.get("_account_name_candidates") or [])
+    for key in NAME_FIELDS:
+        candidates.append(account.get(key))
     candidates.append(account.get("account_name"))
     result = []
     for value in candidates:

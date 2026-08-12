@@ -12,6 +12,19 @@ from miniapp_server import public_account
 
 
 class AccountNormalizationTest(unittest.TestCase):
+    @staticmethod
+    def empty_account_info():
+        return {
+            "account_name": "N/A", "email": "N/A", "email_masked": "N/A",
+            "phone": "N/A", "country": "N/A", "country_currency": "",
+            "membership_status": "N/A", "plan": "N/A", "plan_price": "N/A",
+            "member_since": "N/A", "next_billing": "N/A", "payment_method": "N/A",
+            "cc_type": "N/A", "last4": "N/A", "payment_on_hold": "N/A",
+            "video_quality": "N/A", "max_streams": "N/A", "extra_member": "N/A",
+            "extra_member_slots": "N/A", "profile_count": "N/A", "profiles": [],
+            "_account_name_candidates": [],
+        }
+
     def test_account_name_uses_real_name_fields_not_country(self):
         self.assertEqual(
             normalize_account_payload({"account_name": "Việt Nam", "country": "VN"})["account_name"],
@@ -72,6 +85,50 @@ class AccountNormalizationTest(unittest.TestCase):
             "firstName": "Azril Joy Nalo",
         })
         self.assertEqual(account["account_name"], "Azril Joy Nalo")
+
+    def test_parser_only_accepts_name_from_trusted_account_owner_context(self):
+        info = self.empty_account_info()
+        fixture = {
+            "models": {
+                "localizedCountryPicker": {"data": {"firstName": "Việt Nam"}},
+                "profileModel": {"data": {"displayName": "Kids"}},
+            },
+            "jsonGraph": {
+                "userInfo": {
+                    "firstName": {"$type": "atom", "value": "Nguyễn Chủ Tài Khoản"},
+                },
+                "countryOfSignup": {"$type": "atom", "value": "MY"},
+            },
+            "profiles": [{"firstName": "Profile One"}],
+        }
+        code_goc.NetflixTokenChecker()._parse_account_from_context(fixture, info)
+        account = normalize_account_payload(info)
+        self.assertEqual(account["account_name"], "Nguyễn Chủ Tài Khoản")
+        self.assertNotIn("Việt Nam", info["_account_name_candidates"])
+        self.assertNotIn("Kids", info["_account_name_candidates"])
+
+    def test_parser_does_not_guess_name_from_unrelated_recursive_fields(self):
+        info = self.empty_account_info()
+        fixture = {
+            "models": {"localizedCountryPicker": {"data": {"firstName": "Việt Nam"}}},
+            "profiles": [{"displayName": "Profile One"}],
+            "countryOfSignup": "MY",
+        }
+        code_goc.NetflixTokenChecker()._parse_account_from_context(fixture, info)
+        account = normalize_account_payload(info)
+        self.assertEqual(account["account_name"], "N/A")
+        self.assertEqual(info["_account_name_candidates"], [])
+
+    def test_html_name_fallback_is_scoped_to_user_info(self):
+        info = self.empty_account_info()
+        html = (
+            '<script>{"profiles":[{"firstName":"Wrong Profile"}],'
+            '"userInfo":{"firstName":{"$type":"atom","value":"Correct Owner"}}}</script>'
+            + (" " * 120)
+        )
+        code_goc.NetflixTokenChecker()._scrape_account_regex(html, info)
+        self.assertEqual(info["account_name"], "Correct Owner")
+        self.assertNotEqual(info["account_name"], "Wrong Profile")
 
     def test_nested_shakti_billing_fixture_returns_full_safe_account_fields(self):
         info = {
