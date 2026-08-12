@@ -4,6 +4,7 @@ import html
 import io
 import json
 import os
+import random
 import shutil
 import sqlite3
 import sys
@@ -75,6 +76,12 @@ try:
 except (TypeError, ValueError):
     COOKIE_CHECK_TIMEOUT = 30
 NFTOKEN_TOTAL_TIMEOUT = 90
+try:
+    TRIAL_NFTOKEN_FREE_COOKIE_PERCENT = max(
+        51, min(int(os.getenv("TRIAL_NFTOKEN_FREE_COOKIE_PERCENT", "70")), 99)
+    )
+except (TypeError, ValueError):
+    TRIAL_NFTOKEN_FREE_COOKIE_PERCENT = 70
 MIGRATION_LOCK = threading.Lock()
 MIGRATED_PATHS = set()
 try:
@@ -933,22 +940,53 @@ class ToolError(Exception):
         self.reason_code = reason_code
 
 
+COOKIE_TABLES = {"premium": "premium_cookies", "free": "free_cookies"}
+
+
+def nftoken_cookie_order(allow_free=False):
+    if not allow_free:
+        return ("premium",)
+    if random.randrange(100) < TRIAL_NFTOKEN_FREE_COOKIE_PERCENT:
+        return ("free", "premium")
+    return ("premium", "free")
+
+
+def reserve_cookie_row(connection, sources):
+    for source in sources:
+        table = COOKIE_TABLES.get(source)
+        if not table:
+            continue
+        row = connection.execute(
+            f"SELECT id, data FROM {table} WHERE is_used=0 ORDER BY RANDOM() LIMIT 1"
+        ).fetchone()
+        if not row:
+            continue
+        updated = connection.execute(
+            f"UPDATE {table} SET is_used=1 WHERE id=? AND is_used=0", (row["id"],)
+        )
+        if updated.rowcount == 1:
+            return row["id"], row["data"], source
+    return None
+
+
 def reserve_cookie(connection):
     connection.execute("BEGIN IMMEDIATE")
-    row = connection.execute(
-        "SELECT id, data FROM premium_cookies WHERE is_used=0 ORDER BY RANDOM() LIMIT 1"
-    ).fetchone()
-    if not row:
+    reserved = reserve_cookie_row(connection, ("premium",))
+    if not reserved:
         connection.rollback()
         raise ToolError("Kho Cookie Premium đang trống", 409)
-    updated = connection.execute(
-        "UPDATE premium_cookies SET is_used=1 WHERE id=? AND is_used=0", (row["id"],)
-    )
-    if updated.rowcount != 1:
-        connection.rollback()
-        raise ToolError("Kho vừa thay đổi, vui lòng thử lại", 409)
     connection.commit()
-    return row["id"], row["data"]
+    return reserved[0], reserved[1]
+
+
+def reserve_nftoken_cookie(connection, allow_free=False):
+    connection.execute("BEGIN IMMEDIATE")
+    reserved = reserve_cookie_row(connection, nftoken_cookie_order(allow_free))
+    if not reserved:
+        connection.rollback()
+        raise ToolError("Kho Cookie tạo NFToken đang trống", 409, "stock_empty")
+    connection.commit()
+    return reserved
 
 
 def reserve_nftoken_request(connection, user_id, mode):
@@ -1008,15 +1046,13 @@ def reserve_nftoken_request(connection, user_id, mode):
                 connection.rollback()
                 raise ToolError("Bạn đã hết lượt tạo NFToken", 409, "nftoken_quota_exhausted")
             quota_source = {"kind": "daily_nftoken", "date": today}
-    row = connection.execute(
-        "SELECT id, data FROM premium_cookies WHERE is_used=0 ORDER BY RANDOM() LIMIT 1"
-    ).fetchone()
-    if not row:
+    allow_free = quota_source.get("kind") == "trial_nftoken"
+    reserved = reserve_cookie_row(connection, nftoken_cookie_order(allow_free))
+    if not reserved:
         connection.rollback()
-        raise ToolError("Kho Cookie Premium đang trống", 409)
-    connection.execute("UPDATE premium_cookies SET is_used=1 WHERE id=?", (row["id"],))
+        raise ToolError("Kho Cookie tạo NFToken đang trống", 409, "stock_empty")
     connection.commit()
-    return row["id"], row["data"], quota_source
+    return reserved[0], reserved[1], reserved[2], quota_source
 
 
 def refund_nftoken_request(connection, user_id, quota_source):
@@ -1041,17 +1077,20 @@ def refund_nftoken_request(connection, user_id, quota_source):
         connection.execute(
             """UPDATE usage SET tokens_used=MAX(0,tokens_used-1)
                WHERE user_id=? AND date=?""",
-            (user_id, today),
+            (user_id, source_date),
         )
     connection.commit()
 
 
-def release_cookie(connection, cookie_id, delete=False):
+def release_cookie(connection, cookie_id, delete=False, source="premium"):
+    table = COOKIE_TABLES.get(source)
+    if not table:
+        raise ValueError("Cookie source không hợp lệ")
     connection.execute("BEGIN IMMEDIATE")
     if delete:
-        connection.execute("DELETE FROM premium_cookies WHERE id=?", (cookie_id,))
+        connection.execute(f"DELETE FROM {table} WHERE id=?", (cookie_id,))
     else:
-        connection.execute("UPDATE premium_cookies SET is_used=0 WHERE id=?", (cookie_id,))
+        connection.execute(f"UPDATE {table} SET is_used=0 WHERE id=?", (cookie_id,))
     connection.commit()
 
 
@@ -2092,12 +2131,13 @@ def free_cookie():
 
 
 def generate_one_nftoken(connection, user_id, mode, deadline=None, request_id=None):
-    cookie_id, cookie_data, quota_source = reserve_nftoken_request(connection, user_id, mode)
+    cookie_id, cookie_data, cookie_source, quota_source = reserve_nftoken_request(connection, user_id, mode)
+    allow_free = quota_source.get("kind") == "trial_nftoken"
     last_error = "Không tìm thấy Cookie hoạt động"
     last_reason_code = "cookie_unavailable"
     for attempt in range(5):
         if deadline is not None and time.monotonic() >= deadline:
-            release_cookie(connection, cookie_id, delete=False)
+            release_cookie(connection, cookie_id, delete=False, source=cookie_source)
             refund_nftoken_request(connection, user_id, quota_source)
             raise ToolError("Máy chủ xử lý quá lâu, vui lòng thử lại", 504, "nftoken_timeout")
         try:
@@ -2115,7 +2155,7 @@ def generate_one_nftoken(connection, user_id, mode, deadline=None, request_id=No
             success, token, error, account, netscape = False, None, "checker_exception", {}, None
         if success and token and account.get("membership_status") == "CURRENT_MEMBER":
             # The validated Cookie is a temporary delivery hold; return it to stock.
-            release_cookie(connection, cookie_id, delete=False)
+            release_cookie(connection, cookie_id, delete=False, source=cookie_source)
             copyright_data = copyright_payload(connection)
             nftoken_text = watermark_export(f"NFToken URL: https://netflix.com/?nftoken={quote(str(token), safe='')}\n", copyright_data["text"], f"NFT-{user_id}-{int(time.time())}", user_id, enabled=copyright_data["enabled"])
             download_url = create_secure_download(connection, user_id, 0, nftoken_text, f"nftoken-{user_id}.txt")
@@ -2128,12 +2168,18 @@ def generate_one_nftoken(connection, user_id, mode, deadline=None, request_id=No
             }
         last_reason_code = nftoken_failure_reason(error)
         last_error = nftoken_failure_message(last_reason_code)
-        release_cookie(connection, cookie_id, delete=cookie_should_delete(error, last_reason_code))
+        release_cookie(
+            connection, cookie_id,
+            delete=cookie_should_delete(error, last_reason_code),
+            source=cookie_source,
+        )
         if last_reason_code == "nftoken_timeout":
             break
         if attempt < 4:
             try:
-                cookie_id, cookie_data = reserve_cookie(connection)
+                cookie_id, cookie_data, cookie_source = reserve_nftoken_cookie(
+                    connection, allow_free=allow_free
+                )
             except ToolError:
                 break
     refund_nftoken_request(connection, user_id, quota_source)

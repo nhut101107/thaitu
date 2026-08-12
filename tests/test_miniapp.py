@@ -308,6 +308,83 @@ class MiniAppTest(unittest.TestCase):
         )
         connection.close()
 
+    def test_trial_nftoken_prefers_free_cookie_and_returns_it_to_correct_stock(self):
+        self.set_trial(nftoken=True, nftoken_limit=1)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute("INSERT INTO free_cookies(data) VALUES('NetflixId=weighted-free')")
+        connection.execute("INSERT INTO premium_cookies(data) VALUES('NetflixId=weighted-premium')")
+        connection.commit()
+        connection.close()
+        account = {"membership_status": "CURRENT_MEMBER", "plan": "Premium"}
+        with patch.object(miniapp_server.random, "randrange", return_value=0), patch.object(
+            miniapp_server,
+            "run_cookie_check",
+            return_value=(True, "safe-token", None, account, "netscape"),
+        ) as check:
+            response = self.client.post(
+                "/api/tools/nftoken",
+                json={"mode": "plan", "requestId": "weighted-free-request"},
+                headers=self.headers,
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("weighted-free", check.call_args.args[0])
+        self.assertGreater(miniapp_server.TRIAL_NFTOKEN_FREE_COOKIE_PERCENT, 50)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        self.assertEqual(connection.execute("SELECT is_used FROM free_cookies").fetchone()[0], 0)
+        self.assertEqual(connection.execute("SELECT is_used FROM premium_cookies").fetchone()[0], 0)
+        connection.close()
+
+    def test_trial_nftoken_can_pick_premium_and_falls_back_to_available_stock(self):
+        self.set_trial(nftoken=True, nftoken_limit=2)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute("INSERT INTO free_cookies(data) VALUES('NetflixId=fallback-free')")
+        connection.execute("INSERT INTO premium_cookies(data) VALUES('NetflixId=minority-premium')")
+        connection.commit()
+        connection.close()
+        account = {"membership_status": "CURRENT_MEMBER", "plan": "Premium"}
+        with patch.object(miniapp_server.random, "randrange", return_value=99), patch.object(
+            miniapp_server,
+            "run_cookie_check",
+            return_value=(True, "safe-token", None, account, "netscape"),
+        ) as check:
+            first = self.client.post(
+                "/api/tools/nftoken",
+                json={"mode": "plan", "requestId": "weighted-premium-request"},
+                headers=self.headers,
+            )
+            connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+            connection.execute("UPDATE premium_cookies SET is_used=1")
+            connection.commit()
+            connection.close()
+            second = self.client.post(
+                "/api/tools/nftoken",
+                json={"mode": "plan", "requestId": "weighted-fallback-request"},
+                headers=self.headers,
+            )
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertIn("minority-premium", check.call_args_list[0].args[0])
+        self.assertIn("fallback-free", check.call_args_list[1].args[0])
+
+    def test_paid_nftoken_never_consumes_free_cookie_stock(self):
+        self.set_trial(nftoken=False)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute("UPDATE users SET nftoken_credits=1 WHERE user_id=1")
+        connection.execute("INSERT INTO free_cookies(data) VALUES('NetflixId=free-must-stay')")
+        connection.commit()
+        connection.close()
+        response = self.client.post(
+            "/api/tools/nftoken",
+            json={"mode": "plan", "requestId": "paid-premium-only"},
+            headers=self.headers,
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json["reason_code"], "stock_empty")
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        self.assertEqual(connection.execute("SELECT nftoken_credits FROM users WHERE user_id=1").fetchone()[0], 1)
+        self.assertEqual(connection.execute("SELECT is_used FROM free_cookies").fetchone()[0], 0)
+        connection.close()
+
     def test_trial_cookie_is_used_before_paid_credit_and_idempotent(self):
         self.set_trial(cookie=True, cookie_limit=1)
         connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
@@ -345,10 +422,12 @@ class MiniAppTest(unittest.TestCase):
     def test_failed_trial_request_refunds_trial_and_returns_live_cookie(self):
         self.set_trial(nftoken=True, nftoken_limit=1)
         connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
-        connection.execute("INSERT INTO premium_cookies(data) VALUES('NetflixId=temporary-network-error')")
+        connection.execute("INSERT INTO free_cookies(data) VALUES('NetflixId=temporary-network-error')")
         connection.commit()
         connection.close()
-        with patch.object(miniapp_server, "run_cookie_check", return_value=(False, None, "network_error", {}, None)):
+        with patch.object(miniapp_server.random, "randrange", return_value=0), patch.object(
+            miniapp_server, "run_cookie_check", return_value=(False, None, "network_error", {}, None)
+        ):
             response = self.client.post(
                 "/api/tools/nftoken",
                 json={"mode": "plan", "requestId": "trial-refund-network"},
@@ -363,7 +442,28 @@ class MiniAppTest(unittest.TestCase):
             ).fetchone()[0],
             0,
         )
-        self.assertEqual(connection.execute("SELECT is_used FROM premium_cookies").fetchone()[0], 0)
+        self.assertEqual(connection.execute("SELECT is_used FROM free_cookies").fetchone()[0], 0)
+        connection.close()
+
+    def test_daily_package_refund_uses_original_reservation_date(self):
+        reservation_date = "2026-08-11"
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute(
+            "INSERT INTO usage(user_id,date,tokens_used) VALUES(?,?,1)",
+            (1, reservation_date),
+        )
+        connection.commit()
+        connection.row_factory = sqlite3.Row
+        miniapp_server.refund_nftoken_request(
+            connection, 1, {"kind": "daily_nftoken", "date": reservation_date}
+        )
+        self.assertEqual(
+            connection.execute(
+                "SELECT tokens_used FROM usage WHERE user_id=? AND date=?",
+                (1, reservation_date),
+            ).fetchone()[0],
+            0,
+        )
         connection.close()
 
     def test_trial_can_be_locked_and_then_requires_purchased_quota(self):
