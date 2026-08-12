@@ -1,11 +1,11 @@
-const CACHE_VERSION = "shop-mmo-static-v7";
+const CACHE_VERSION = "shop-mmo-static-v8";
 const STATIC_ASSETS = [
   "/",
   "/manifest.json",
   "/assets/styles.css",
   "/assets/modern.css?v=2",
   "/assets/tools.css?v=4",
-  "/assets/theme.css?v=2",
+  "/assets/theme.css?v=3",
   "/assets/app.js?v=19",
   "/assets/api.js?v=19",
   "/assets/state.js",

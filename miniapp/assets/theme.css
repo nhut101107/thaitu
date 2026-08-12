@@ -9,8 +9,13 @@
   --neon: #fafafa;
   --primary: #f4f4f5;
   --primary-gradient: linear-gradient(135deg, #09090b, #27272a 56%, #52525b);
+  --mint: #e4e4e7;
+  --mint-dark: #d4d4d8;
+  --surface-2: #18181b;
+  --danger: #f87171;
   --shadow: 0 18px 45px rgba(0, 0, 0, .34);
   --surface: rgba(18, 18, 20, .82);
+  color-scheme: dark;
 }
 
 html, body { background: var(--bg); color: var(--ink); }
@@ -263,4 +268,55 @@ body::after { right: -150px; bottom: 18%; background: #18181b; animation-delay: 
     content-visibility: auto;
     contain-intrinsic-size: 260px;
   }
+}
+
+/* Final dark-palette pass. These selectors override legacy light/green
+   component rules that are still loaded for compatibility with older views. */
+.feature-switches label,
+.inventory-cards article,
+.audit-row,
+.admin-tx-summary,
+.upload-zone,
+.upload-progress,
+.tool-stock,
+.tv-log,
+.tv-error,
+.deposit-amount {
+  background: #151517 !important;
+  color: var(--ink) !important;
+  border-color: var(--line) !important;
+}
+.tv-hero > span,
+.tv-log-row i,
+.tv-log-row.done i,
+.tv-log-row.active i {
+  background: #242428 !important;
+  color: #f4f4f5 !important;
+}
+.tv-log-row,
+.tv-log-row.done,
+.tv-log-row.active {
+  color: var(--muted) !important;
+}
+.tv-log-row.error,
+.tv-error {
+  color: #fca5a5 !important;
+}
+.tv-log-row.error i {
+  background: #3f181b !important;
+  color: #fca5a5 !important;
+}
+.order-card header em {
+  background: #242428 !important;
+  color: #e4e4e7 !important;
+}
+.admin-page input[type="checkbox"]:checked,
+.modal-sheet input[type="checkbox"]:checked {
+  background: #27272a !important;
+  border-color: #f4f4f5 !important;
+}
+.admin-page input[type="checkbox"]:checked::after,
+.modal-sheet input[type="checkbox"]:checked::after {
+  border-right-color: #f4f4f5 !important;
+  border-bottom-color: #f4f4f5 !important;
 }
