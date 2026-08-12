@@ -361,6 +361,7 @@ def migrate():
         "warranty_days": "INTEGER DEFAULT 0",
         "active": "INTEGER DEFAULT 1",
         "purchases": "INTEGER DEFAULT 0",
+        "requires_customer_email": "INTEGER DEFAULT 0",
     }
     for name, definition in additions.items():
         if name not in store_columns:
@@ -379,6 +380,10 @@ def migrate():
         "promo_code": "TEXT DEFAULT ''",
         "provider_id": "INTEGER",
         "external_order_id": "TEXT DEFAULT ''",
+        "customer_email": "TEXT DEFAULT ''",
+        "customer_email_approved": "INTEGER DEFAULT 0",
+        "customer_email_approved_at": "TEXT",
+        "customer_email_notified_at": "TEXT",
     }
     for name, definition in history_additions.items():
         if name not in history_columns:
@@ -1007,6 +1012,55 @@ def json_body():
     if not isinstance(value, dict):
         raise ValueError("JSON không hợp lệ")
     return value
+
+
+EMAIL_LOCAL_RE = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}$")
+EMAIL_DOMAIN_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$"
+)
+
+
+def normalize_customer_email(value):
+    """Normalize the service email without logging the submitted value."""
+    if not isinstance(value, str):
+        return ""
+    email = value.strip().lower()
+    if len(email) > 254 or any(ord(char) < 32 or ord(char) == 127 for char in email):
+        return ""
+    local, separator, domain = email.rpartition("@")
+    if not separator or not EMAIL_LOCAL_RE.fullmatch(local) or ".." in local:
+        return ""
+    if local.startswith(".") or local.endswith(".") or not EMAIL_DOMAIN_RE.fullmatch(domain):
+        return ""
+    return email
+
+
+def required_customer_emails(body, items):
+    """Validate the email against the current cart, then repeat after cart locking."""
+    per_item = body.get("customerEmails")
+    if not isinstance(per_item, dict):
+        per_item = {}
+    result = {}
+    for item in items:
+        if not item.get("requiresCustomerEmail"):
+            continue
+        raw = per_item.get(str(item["id"]), body.get("customerEmail", ""))
+        normalized = normalize_customer_email(raw)
+        if not raw:
+            raise ToolError(
+                "Vui lòng nhập Gmail/email để nhận dịch vụ",
+                400,
+                "customer_email_required",
+            )
+        if not normalized:
+            raise ToolError(
+                "Gmail/email nhận dịch vụ không hợp lệ",
+                400,
+                "invalid_customer_email",
+            )
+        result[int(item["id"])] = normalized
+    return result
 
 
 FEATURE_KEYS = {
@@ -1933,7 +1987,10 @@ def create_provider_order_with_fallback(connection, item, user_id, checkout_key,
     for candidate in candidates:
         started = time.perf_counter()
         try:
-            result = provider_for(candidate).create_order(item["externalProductId"], quantity, checkout_key, {"checkout_key": checkout_key})
+            result = provider_for(candidate).create_order(
+                item["externalProductId"], quantity, checkout_key,
+                {"checkout_key": checkout_key, "customer_email": item.get("customerEmail", "")},
+            )
             status = str(result.get("status", "fulfilled")).lower()
             if status in {"failed", "rejected", "error"}:
                 raise ProviderError("provider_rejected", "Nhà cung cấp từ chối yêu cầu")
@@ -1997,6 +2054,7 @@ def product_dict(row, include_auto_image=True):
         "purchases": row["purchases"] or 0,
         "providerId": row["provider_id"] if "provider_id" in row.keys() else None,
         "externalProductId": row["external_product_id"] if "external_product_id" in row.keys() else "",
+        "requiresCustomerEmail": bool(row["requires_customer_email"] if "requires_customer_email" in row.keys() else 0),
     }
 
 
@@ -2301,6 +2359,9 @@ def checkout():
         cart = cart_payload(connection, user_id)
         if not cart["items"]:
             return jsonify({"ok": False, "error": "Giỏ hàng đang trống"}), 400
+        customer_emails = required_customer_emails(body, cart["items"])
+        for item in cart["items"]:
+            item["customerEmail"] = customer_emails.get(int(item["id"]), "")
         promo = calculate_promo(connection, user_id, promo_code, cart["items"])
         user = connection.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)).fetchone()
         if not user:
@@ -2331,6 +2392,9 @@ def checkout():
             connection.commit()
             return jsonify({"ok": True, "duplicate": True, "orderIds": json.loads(existing[0]), "total": existing[1]})
         locked_cart = cart_payload(connection, user_id)
+        customer_emails = required_customer_emails(body, locked_cart["items"])
+        for item in locked_cart["items"]:
+            item["customerEmail"] = customer_emails.get(int(item["id"]), "")
         locked_promo = calculate_promo(connection, user_id, promo_code, locked_cart["items"])
         locked_snapshot = [
             (int(item["id"]), int(item["quantity"]), int(item["price"]), int(item["lineTotal"]),
@@ -2372,12 +2436,12 @@ def checkout():
             cursor = connection.execute(
                 """INSERT INTO purchase_history
                    (user_id, plan_name, price, date, store_item_id, quantity, status, warranty_until,
-                    original_price,discount_percent,discount_amount,final_price,promo_code,provider_id,external_order_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    original_price,discount_percent,discount_amount,final_price,promo_code,provider_id,external_order_id,customer_email)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (user_id, item["name"], item["lineTotal"], now.strftime("%Y-%m-%d %H:%M:%S"), item["id"], item["quantity"],
                  ("PENDING" if any(product["id"] == item["id"] and str(result.get("status", "fulfilled")).lower() not in {"fulfilled", "complete", "completed"} for _provider, product, _key, result in provider_orders) else "FULFILLED") if item.get("providerId") else "COMPLETED", warranty, item["lineTotal"], promo["percent"],
                  (item["lineTotal"] * promo["percent"] // 100), item["lineTotal"] - (item["lineTotal"] * promo["percent"] // 100),
-                 promo["code"], item.get("providerId"), next((str(result.get("order_id", result.get("id", ""))) for provider, product, provider_key, result in provider_orders if product["id"] == item["id"]), "")),
+                 promo["code"], item.get("providerId"), next((str(result.get("order_id", result.get("id", ""))) for provider, product, provider_key, result in provider_orders if product["id"] == item["id"]), ""), item.get("customerEmail", "")),
             )
             order_ids.append(cursor.lastrowid)
             connection.execute(
@@ -2430,7 +2494,8 @@ def checkout():
 def orders():
     user_id = int(g.telegram_user["id"])
     rows = db().execute(
-        """SELECT id, plan_name, price, date, quantity, status, warranty_until
+        """SELECT id, plan_name, price, date, quantity, status, warranty_until, customer_email,
+                  customer_email_approved, customer_email_approved_at
            FROM purchase_history WHERE user_id=? ORDER BY id DESC LIMIT 100""",
         (user_id,),
     ).fetchall()
@@ -2441,7 +2506,8 @@ def orders():
 @authenticated
 def order(order_id):
     row = db().execute(
-        """SELECT id, plan_name, price, date, quantity, status, warranty_until
+        """SELECT id, plan_name, price, date, quantity, status, warranty_until, customer_email,
+                  customer_email_approved, customer_email_approved_at
            FROM purchase_history WHERE id=? AND user_id=?""",
         (order_id, int(g.telegram_user["id"])),
     ).fetchone()
@@ -3417,6 +3483,7 @@ def admin_product_values(body):
         name, price, credits, nftoken_credits, description, category, image_url,
         int(bool(body.get("featured", False))), warranty_days,
         int(bool(body.get("active", True))), provider_id, external_product_id,
+        int(bool(body.get("requiresCustomerEmail", False))),
     )
 
 
@@ -3566,7 +3633,8 @@ def admin_dashboard():
     ).fetchall()
     orders = connection.execute(
         """SELECT p.id,p.user_id,u.username,p.plan_name,p.price,p.date,p.quantity,
-                  p.status,p.warranty_until
+                  p.status,p.warranty_until,p.customer_email,p.customer_email_approved,
+                  p.customer_email_approved_at
            FROM purchase_history p LEFT JOIN users u ON u.user_id=p.user_id
            ORDER BY p.id DESC LIMIT 100"""
     ).fetchall()
@@ -3673,8 +3741,8 @@ def admin_create_product():
     try:
         cursor = connection.execute(
             """INSERT INTO store
-               (name,price,credits,nftoken_credits,description,category,image_url,featured,warranty_days,active,provider_id,external_product_id)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+               (name,price,credits,nftoken_credits,description,category,image_url,featured,warranty_days,active,provider_id,external_product_id,requires_customer_email)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             values,
         )
         admin_audit(connection, "product.create", cursor.lastrowid, values[0])
@@ -3704,7 +3772,7 @@ def admin_update_product(item_id):
     connection = db()
     updated = connection.execute(
         """UPDATE store SET name=?,price=?,credits=?,nftoken_credits=?,description=?,category=?,image_url=?,
-           featured=?,warranty_days=?,active=?,provider_id=?,external_product_id=? WHERE id=?""",
+           featured=?,warranty_days=?,active=?,provider_id=?,external_product_id=?,requires_customer_email=? WHERE id=?""",
         (*values, item_id),
     )
     if updated.rowcount == 1:
@@ -4320,6 +4388,7 @@ def admin_update_order(order_id):
         body = json_body()
         status = str(body.get("status", "COMPLETED")).strip().upper()
         warranty_raw = str(body.get("warrantyUntil", "")).strip()
+        email_approved = bool(body.get("emailApproved", False))
     except ValueError as error:
         return jsonify({"ok": False, "error": str(error)}), 400
     if status not in {"PROCESSING", "COMPLETED", "CANCELLED", "WARRANTY"}:
@@ -4331,16 +4400,72 @@ def admin_update_order(order_id):
         except ValueError:
             return jsonify({"ok": False, "error": "Ngày bảo hành không hợp lệ"}), 400
     connection = db()
+    connection.execute("BEGIN IMMEDIATE")
+    order = connection.execute(
+        """SELECT id,user_id,plan_name,customer_email,customer_email_approved,
+                  customer_email_notified_at
+           FROM purchase_history WHERE id=?""",
+        (order_id,),
+    ).fetchone()
+    if not order:
+        connection.rollback()
+        return jsonify({"ok": False, "error": "Không tìm thấy đơn hàng"}), 404
+    if email_approved and not order["customer_email"]:
+        connection.rollback()
+        return jsonify({
+            "ok": False,
+            "reason_code": "customer_email_missing",
+            "error": "Đơn hàng không có Gmail/email để duyệt",
+        }), 400
+    newly_approved = email_approved and not int(order["customer_email_approved"] or 0)
+    should_notify = email_approved and (
+        newly_approved or not order["customer_email_notified_at"]
+    )
+    approved_at = now_iso() if newly_approved else None
     updated = connection.execute(
-        "UPDATE purchase_history SET status=?,warranty_until=? WHERE id=?",
-        (status, warranty, order_id),
+        """UPDATE purchase_history
+           SET status=?,warranty_until=?,
+               customer_email_approved=CASE WHEN ?=1 THEN 1 ELSE customer_email_approved END,
+               customer_email_approved_at=CASE WHEN ?=1 THEN COALESCE(customer_email_approved_at,?) ELSE customer_email_approved_at END
+           WHERE id=?""",
+        (status, warranty, int(email_approved), int(email_approved), approved_at, order_id),
     )
     if updated.rowcount == 1:
-        admin_audit(connection, "order.update", order_id, f"status={status},warranty={warranty or '-'}")
+        admin_audit(connection, "order.update", order_id, f"status={status},warranty={warranty or '-'},email_approved={int(email_approved)}")
+        if newly_approved:
+            notify(
+                connection,
+                order["user_id"],
+                "customer_email_approved",
+                f"Gmail nhận dịch vụ đơn #{order_id} đã được duyệt",
+                "Admin đã xác nhận Gmail/email nhận dịch vụ. Đơn hàng đang được xử lý.",
+                {"orderId": order_id, "emailApproved": True},
+            )
     connection.commit()
     if updated.rowcount != 1:
         return jsonify({"ok": False, "error": "Không tìm thấy đơn hàng"}), 404
-    return jsonify({"ok": True})
+
+    notification_sent = False
+    if should_notify:
+        notification_sent = telegram_send(
+            str(order["user_id"]),
+            f"✅ <b>Gmail nhận dịch vụ đã được Admin duyệt</b>\nĐơn hàng #{order_id} · {html.escape(str(order['plan_name'] or 'Sản phẩm'))}\nĐơn hàng đang được xử lý.",
+        )
+        if notification_sent:
+            delivery_connection = sqlite3.connect(DATABASE_PATH, timeout=30)
+            try:
+                delivery_connection.execute(
+                    "UPDATE purchase_history SET customer_email_notified_at=COALESCE(customer_email_notified_at,?) WHERE id=?",
+                    (now_iso(), order_id),
+                )
+                delivery_connection.commit()
+            finally:
+                delivery_connection.close()
+    return jsonify({
+        "ok": True,
+        "emailApproved": bool(email_approved or order["customer_email_approved"]),
+        "notificationSent": notification_sent,
+    })
 
 
 @app.get("/api/download/<path:token>")

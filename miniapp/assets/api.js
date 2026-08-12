@@ -89,7 +89,7 @@ export const api = {
   product: (id) => request(`/api/products/${id}`),
   cart: () => request("/api/cart"),
   setCart: (id, quantity) => request(`/api/cart/${id}`, {method: "PUT", body: JSON.stringify({quantity})}),
-  checkout: (idempotencyKey, promoCode = "") => request("/api/checkout", {method: "POST", body: JSON.stringify({idempotencyKey, promoCode})}),
+  checkout: (idempotencyKey, promoCode = "", customerEmail = "") => request("/api/checkout", {method: "POST", body: JSON.stringify({idempotencyKey, promoCode, customerEmail})}),
   orders: () => request("/api/orders"),
   order: (id) => request(`/api/orders/${id}`),
   transactions: () => request("/api/transactions"),

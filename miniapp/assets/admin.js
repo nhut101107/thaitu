@@ -121,7 +121,7 @@ function copyrightDialog() {
   modal(`<div class="eyebrow">BRAND & COPYRIGHT</div><h2>Bản quyền export</h2><form data-copyright-form><label class="field">Nội dung<textarea name="text" maxlength="2000">${escapeHtml(current.text || "")}</textarea></label><label><input name="enabled" type="checkbox" ${current.enabled ? "checked" : ""}> Bật watermark</label><label class="field">Ảnh thương hiệu<input name="file" type="file" accept="image/png,image/jpeg,image/webp"></label><button class="button wide">Lưu cấu hình</button></form>`, {onOpen(root, close) { root.querySelector("[data-copyright-form]").onsubmit = async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); try { await api.adminUpdateCopyright({enabled: form.has("enabled"), text: form.get("text")}); const file = form.get("file"); if (file?.size) await api.adminUploadBrand(file); close(); await loadAdmin(); toast("Đã lưu bản quyền"); } catch (error) { toast(error.message, "error"); } }; }});
 }
 
-function productDialog(item = null) {
+function legacyProductDialog(item = null) {
   modal(`<div class="eyebrow">QUẢN LÝ CỬA HÀNG</div><h2>${item ? "Sửa sản phẩm" : "Thêm sản phẩm"}</h2><form data-product-form>
     <label class="field">Tên sản phẩm<input name="name" maxlength="80" value="${escapeHtml(item?.name || "")}" required></label>
     <label class="field">Giá bán<input name="price" type="number" min="0" value="${item?.price || 0}" required></label>
@@ -135,6 +135,26 @@ function productDialog(item = null) {
       root.querySelector("[data-product-form]").onsubmit = async (event) => {
         event.preventDefault(); const form = new FormData(event.currentTarget);
         const value = {name: form.get("name"), price: Number(form.get("price")), nftokenCredits: Number(form.get("nftokenCredits")), credits: Number(form.get("credits")), category: form.get("category"), description: form.get("description"), imageUrl: form.get("imageUrl"), warrantyDays: form.has("noWarranty") ? 0 : Number(form.get("warrantyDays")), providerId: form.get("providerId") ? Number(form.get("providerId")) : null, externalProductId: form.get("externalProductId"), featured: form.has("featured"), active: form.has("active")};
+        try { item ? await api.adminUpdateProduct(item.id, value) : await api.adminCreateProduct(value); close(); await loadAdmin(); toast("Đã lưu sản phẩm"); } catch (error) { toast(`${error.message}${error.reasonCode && error.reasonCode !== "unknown_error" ? ` [${error.reasonCode}]` : ""}`, "error"); }
+      };
+    }});
+}
+
+function productDialog(item = null) {
+  modal(`<div class="eyebrow">QUẢN LÝ CỬA HÀNG</div><h2>${item ? "Sửa sản phẩm" : "Thêm sản phẩm"}</h2><form data-product-form>
+    <label class="field">Tên sản phẩm<input name="name" maxlength="80" value="${escapeHtml(item?.name || "")}" required></label>
+    <label class="field">Giá bán<input name="price" type="number" min="0" value="${item?.price || 0}" required></label>
+    <div class="field-pair"><label class="field">Lượt tạo link NFToken<input name="nftokenCredits" type="number" min="0" value="${item?.nftokenCredits || 0}" required></label><label class="field">Lượt lấy Cookie VIP<input name="credits" type="number" min="0" value="${item?.credits || 0}" required></label></div>
+    <label class="field">Danh mục<input name="category" maxlength="80" value="${escapeHtml(item?.category || "Gói Cookie VIP")}" required></label>
+    <label class="field">Mô tả<textarea name="description" maxlength="1000">${escapeHtml(item?.description || "")}</textarea></label>
+    <label class="field">Link ảnh HTTPS<input name="imageUrl" type="url" value="${escapeHtml(item?.imageUrl || "")}" placeholder="https://..."></label>
+    <label class="field">Số ngày bảo hành<input name="warrantyDays" type="number" min="0" max="3650" value="${item?.warrantyDays || 0}"></label><label class="check-row"><input name="noWarranty" type="checkbox" ${item && !item.warrantyDays ? "checked" : ""}> Không bảo hành</label>
+    <label class="check-row"><input name="requiresCustomerEmail" type="checkbox" ${item?.requiresCustomerEmail ? "checked" : ""}> Yêu cầu khách nhập Gmail/email để nhận dịch vụ</label>
+    <div class="check-row"><label><input name="featured" type="checkbox" ${item?.featured ? "checked" : ""}> Sản phẩm nổi bật</label><label><input name="active" type="checkbox" ${item?.available !== false ? "checked" : ""}> Đang bán</label></div>
+    <button class="button wide">${item ? "Lưu thay đổi" : "Tạo sản phẩm"}</button></form>`, {onOpen(root, close) {
+      root.querySelector("[data-product-form]").onsubmit = async (event) => {
+        event.preventDefault(); const form = new FormData(event.currentTarget);
+        const value = {name: form.get("name"), price: Number(form.get("price")), nftokenCredits: Number(form.get("nftokenCredits")), credits: Number(form.get("credits")), category: form.get("category"), description: form.get("description"), imageUrl: form.get("imageUrl"), warrantyDays: form.has("noWarranty") ? 0 : Number(form.get("warrantyDays")), providerId: form.get("providerId") ? Number(form.get("providerId")) : null, externalProductId: form.get("externalProductId"), requiresCustomerEmail: form.has("requiresCustomerEmail"), featured: form.has("featured"), active: form.has("active")};
         try { item ? await api.adminUpdateProduct(item.id, value) : await api.adminCreateProduct(value); close(); await loadAdmin(); toast("Đã lưu sản phẩm"); } catch (error) { toast(`${error.message}${error.reasonCode && error.reasonCode !== "unknown_error" ? ` [${error.reasonCode}]` : ""}`, "error"); }
       };
     }});
@@ -222,9 +242,22 @@ function inventoryDialog(kind) {
   }});
 }
 
-function orderDialog(order) {
+function legacyOrderDialog(order) {
   const dateValue = order.warranty_until ? String(order.warranty_until).slice(0, 10) : "";
   modal(`<div class="eyebrow">ĐƠN HÀNG #${order.id}</div><h2>${escapeHtml(order.plan_name)}</h2><form data-order-form><label class="field">Trạng thái<select name="status">${["PROCESSING","COMPLETED","WARRANTY","CANCELLED"].map((status) => `<option value="${status}" ${status === (order.status || "COMPLETED") ? "selected" : ""}>${status}</option>`).join("")}</select></label><label class="field">Hạn bảo hành<input name="warranty" type="date" value="${escapeHtml(dateValue)}"></label><button class="button wide">Lưu đơn hàng</button></form>`, {onOpen(root, close) { root.querySelector("[data-order-form]").onsubmit = async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); try { await api.adminUpdateOrder(order.id, {status: form.get("status"), warrantyUntil: form.get("warranty")}); close(); await loadAdmin(); toast("Đã cập nhật đơn hàng"); } catch (error) { toast(error.message, "error"); } }; }});
+}
+
+function orderDialog(order) {
+  const email = order.customer_email || "";
+  modal(`<div class="eyebrow">ĐƠN HÀNG #${order.id}</div><h2>${escapeHtml(order.plan_name)}</h2><dl><div><dt>Khách hàng</dt><dd>${order.user_id}${order.username ? ` · @${escapeHtml(order.username)}` : ""}</dd></div>${email ? `<div><dt>Gmail/email nhận dịch vụ</dt><dd>${escapeHtml(email)}</dd></div>` : ""}<div><dt>Giá trị</dt><dd>${formatMoney(order.price)}</dd></div><div><dt>Trạng thái</dt><dd>${escapeHtml(order.status || "COMPLETED")}</dd></div></dl><form data-order-form><label class="field">Trạng thái<select name="status">${["PROCESSING","COMPLETED","WARRANTY","CANCELLED"].map((status) => `<option value="${status}" ${status === (order.status || "COMPLETED") ? "selected" : ""}>${status}</option>`).join("")}</select></label><label class="field">Hạn bảo hành<input name="warranty" type="date" value="${escapeHtml(order.warranty_until ? String(order.warranty_until).slice(0, 10) : "")}"></label><button class="button wide">Lưu đơn hàng</button></form>`, {onOpen(root, close) {
+    const formRoot = root.querySelector("[data-order-form]");
+    if (email && !order.customer_email_approved) {
+      const approve = document.createElement("button"); approve.type = "button"; approve.className = "button secondary wide"; approve.textContent = "Duyệt Gmail & báo khách";
+      formRoot.before(approve);
+      approve.onclick = async () => { const done = busyButton(approve, "Đang duyệt..."); try { const form = new FormData(formRoot); await api.adminUpdateOrder(order.id, {status: form.get("status"), warrantyUntil: form.get("warranty"), emailApproved: true}); close(); await loadAdmin(); toast("Đã duyệt Gmail và báo khách"); } catch (error) { toast(error.message, "error"); } finally { done(); } };
+    }
+    formRoot.onsubmit = async (event) => { event.preventDefault(); const form = new FormData(event.currentTarget); try { await api.adminUpdateOrder(order.id, {status: form.get("status"), warrantyUntil: form.get("warranty")}); close(); await loadAdmin(); toast("Đã lưu đơn hàng"); } catch (error) { toast(error.message, "error"); } };
+  }});
 }
 
 export function bindAdminEvents() {

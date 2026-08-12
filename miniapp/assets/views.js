@@ -99,7 +99,7 @@ export async function addToCart(id) {
   } catch (error) { toast(error.message, "error"); }
 }
 
-export function openCart() {
+function legacyOpenCart() {
   const content = state.cart.items.length ? `${state.cart.items.map((item) => `<div class="cart-line"><div><b>${escapeHtml(item.name)}</b><small>${formatMoney(item.price)}</small></div><div><button data-qty="${item.id}" data-value="${item.quantity - 1}">−</button><span>${item.quantity}</span><button data-qty="${item.id}" data-value="${item.quantity + 1}">+</button></div></div>`).join("")}<div class="cart-total"><span>Tổng thanh toán</span><b>${formatMoney(state.cart.total)}</b></div><button class="button wide" data-checkout>Xác nhận mua hàng</button>` : emptyState("Giỏ hàng trống", "Thêm sản phẩm từ cửa hàng để tiếp tục.");
   modal(`<h2>Giỏ hàng</h2>${content}`, {onOpen(root, close) {
     root.querySelectorAll("[data-qty]").forEach((button) => button.onclick = async () => { try { const cart = await api.setCart(button.dataset.qty, Number(button.dataset.value)); update({cart}); close(); openCart(); } catch (error) { toast(error.message, "error"); } });
@@ -107,7 +107,7 @@ export function openCart() {
   }});
 }
 
-function confirmCheckout(closeCart) {
+function legacyConfirmCheckout(closeCart) {
   modal(`<div class="confirm-icon">${icon("shield")}</div><h2>Xác nhận thanh toán?</h2><p>Backend sẽ kiểm tra lại giá, sản phẩm và số dư trước khi tạo đơn.</p><label class="field">Mã giảm giá (không bắt buộc)<input id="checkout-promo" maxlength="50" autocomplete="off" placeholder="Nhập mã giảm giá"></label><div class="cart-total"><span>Tổng cộng</span><b>${formatMoney(state.cart.total)}</b></div><button class="button wide" data-confirm-checkout>Mua ngay</button>`, {onOpen(root, close) { root.querySelector("[data-confirm-checkout]").onclick = async (event) => {
     if (state.busy) return; state.busy = true; event.currentTarget.disabled = true;
     try { const key = crypto.randomUUID().replaceAll("-", ""); const promoCode = root.querySelector("#checkout-promo")?.value.trim() || ""; const result = await api.checkout(key, promoCode); update({cart:{items:[],count:0,total:0}}); close(); closeCart(); toast(`Thanh toán thành công ${formatMoney(result.total)}`); }
@@ -360,6 +360,33 @@ export async function openDevices() {
     const result = await api.devices();
     modal(`<div class="eyebrow">BẢO MẬT TÀI KHOẢN</div><h2>Thiết bị đăng nhập</h2><p>Tối đa ${result.limit} thiết bị.</p>${result.items.map((item) => `<article class="device-card"><div><b>${escapeHtml(item.label)}</b><small>${escapeHtml(item.platform || "Web")} · ${escapeHtml(item.lastSeenAt)}</small></div>${item.current ? "<em>Thiết bị này</em>" : item.revoked ? "<em>Đã thu hồi</em>" : `<button data-revoke-device="${item.id}">Thu hồi</button>`}</article>`).join("")}`, {onOpen(root, close) { root.querySelectorAll("[data-revoke-device]").forEach((button) => button.onclick = async () => { try { await api.revokeDevice(button.dataset.revokeDevice); close(); openDevices(); } catch (error) { toast(error.message, "error"); } }); }});
   } catch (error) { toast(error.message, "error"); }
+}
+
+// Checkout override: products marked by Admin require a service email before payment.
+export function openCart() {
+  const requiresEmail = state.cart.items.some((item) => item.requiresCustomerEmail);
+  const emailNotice = requiresEmail
+    ? `<div class="notice-card"><b>Gmail/email nhận dịch vụ</b><small>Sản phẩm trong giỏ cần địa chỉ email để giao dịch vụ.</small></div>`
+    : "";
+  const content = state.cart.items.length ? `${state.cart.items.map((item) => `<div class="cart-line"><div><b>${escapeHtml(item.name)}</b><small>${formatMoney(item.price)}${item.requiresCustomerEmail ? " · cần Gmail/email" : ""}</small></div><div><button data-qty="${item.id}" data-value="${item.quantity - 1}">−</button><span>${item.quantity}</span><button data-qty="${item.id}" data-value="${item.quantity + 1}">+</button></div></div>`).join("")}${emailNotice}<div class="cart-total"><span>Tổng thanh toán</span><b>${formatMoney(state.cart.total)}</b></div><button class="button wide" data-checkout>Xác nhận mua hàng</button>` : emptyState("Giỏ hàng trống", "Thêm sản phẩm từ cửa hàng để tiếp tục.");
+  modal(`<h2>Giỏ hàng</h2>${content}`, {onOpen(root, close) {
+    root.querySelectorAll("[data-qty]").forEach((button) => button.onclick = async () => { try { const cart = await api.setCart(button.dataset.qty, Number(button.dataset.value)); update({cart}); close(); openCart(); } catch (error) { toast(error.message, "error"); } });
+    const checkout = root.querySelector("[data-checkout]"); if (checkout) checkout.onclick = () => confirmCheckout(close, requiresEmail);
+  }});
+}
+
+function confirmCheckout(closeCart, requiresEmail = false) {
+  const emailField = requiresEmail
+    ? `<label class="field">Gmail/email nhận dịch vụ<input id="checkout-customer-email" type="email" maxlength="254" autocomplete="email" required placeholder="you@example.com"><small>Email này được dùng để giao sản phẩm.</small></label>`
+    : "";
+  modal(`<div class="confirm-icon">${icon("shield")}</div><h2>Xác nhận thanh toán?</h2><p>Backend sẽ kiểm tra lại giá, sản phẩm và số dư trước khi tạo đơn.</p>${emailField}<label class="field">Mã giảm giá (không bắt buộc)<input id="checkout-promo" maxlength="50" autocomplete="off" placeholder="Nhập mã giảm giá"></label><div class="cart-total"><span>Tổng cộng</span><b>${formatMoney(state.cart.total)}</b></div><button class="button wide" data-confirm-checkout>Mua ngay</button>`, {onOpen(root, close) { root.querySelector("[data-confirm-checkout]").onclick = async (event) => {
+    if (state.busy) return; state.busy = true; event.currentTarget.disabled = true;
+    const emailInput = root.querySelector("#checkout-customer-email");
+    if (emailInput && !emailInput.reportValidity()) { state.busy = false; event.currentTarget.disabled = false; return; }
+    try { const key = crypto.randomUUID().replaceAll("-", ""); const promoCode = root.querySelector("#checkout-promo")?.value.trim() || ""; const customerEmail = emailInput?.value.trim() || ""; const result = await api.checkout(key, promoCode, customerEmail); update({cart:{items:[],count:0,total:0}}); close(); closeCart(); toast(`Thanh toán thành công ${formatMoney(result.total)}`); }
+    catch (error) { toast(error.message, "error"); event.currentTarget.disabled = false; }
+    finally { state.busy = false; }
+  }; }});
 }
 
 export function openHelp() {
