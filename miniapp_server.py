@@ -39,6 +39,9 @@ AUTH_MAX_AGE = int(os.getenv("MINIAPP_AUTH_MAX_AGE", "3600"))
 PAGE_SIZE = 20
 TV_LOGIN_RUNTIME_VERSION = "tv-login-runtime-r10"
 DOWNLOAD_SECRET = os.getenv("MINIAPP_DOWNLOAD_SECRET") or os.getenv("TELEGRAM_BOT_TOKEN", "nftoken-download-secret")
+REQUIRED_GROUP_CHAT = os.getenv("TELEGRAM_REQUIRED_GROUP", "@mnhutgroup").strip() or "@mnhutgroup"
+REQUIRED_GROUP_URL = os.getenv("TELEGRAM_REQUIRED_GROUP_URL", "https://t.me/mnhutgroup").strip() or "https://t.me/mnhutgroup"
+GROUP_GATE_ENABLED = os.getenv("TELEGRAM_GROUP_GATE_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
 try:
     PWA_SESSION_MAX_AGE = max(900, min(int(os.getenv("MINIAPP_PWA_SESSION_MAX_AGE", "604800")), 2592000))
 except (TypeError, ValueError):
@@ -398,6 +401,9 @@ def migrate():
         "referral_qualified": "INTEGER DEFAULT 0",
         "referral_joined_at": "TEXT",
         "language": "TEXT DEFAULT 'vi'",
+        "group_verified": "INTEGER DEFAULT 0",
+        "group_verified_at": "TEXT",
+        "group_member_status": "TEXT DEFAULT ''",
     }.items():
         if name not in user_columns:
             connection.execute(f"ALTER TABLE users ADD COLUMN {name} {definition}")
@@ -945,6 +951,17 @@ def authenticated(handler):
             return jsonify({"ok": False, "error": str(error)}), 401
         connection = db()
         user_id = ensure_user(connection, g.telegram_user)
+        membership = connection.execute(
+            "SELECT group_verified FROM users WHERE user_id=?", (user_id,)
+        ).fetchone()
+        if GROUP_GATE_ENABLED and user_id != configured_admin_id() and not (membership and membership[0]):
+            connection.commit()
+            return jsonify({
+                "ok": False,
+                "error": "Bạn cần tham gia nhóm mnhutgroup và quay lại bot bấm Xác nhận trước khi mở Shop MMO",
+                "reason_code": "group_membership_required",
+                "join_url": REQUIRED_GROUP_URL,
+            }), 403
         register_referral(connection, user_id, g.telegram_user.get("_start_param"))
         device = register_device(connection, user_id)
         if not device["ok"]:

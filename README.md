@@ -11,7 +11,7 @@
 - `premium_cookies`: dùng để hiển thị tồn kho tổng quan; dữ liệu cookie không bao giờ được trả về frontend.
 - `miniapp_cart`, `miniapp_checkouts`: giỏ hàng và khóa idempotency mới, được tạo tự động bởi migration không phá schema cũ.
 
-Bot chỉ đăng ký `/start` để hỗ trợ Telegram deep-link/referral và mở menu Web App **Shop MMO**. Referral, quản lý thiết bị, lịch sử giao hàng và bảo hành được xử lý trực tiếp trong Mini App; người dùng không thể tự sửa hạng hoặc quyền lợi.
+Bot chỉ đăng ký `/start` để hỗ trợ Telegram deep-link/referral. Khi `TELEGRAM_GROUP_GATE_ENABLED=1`, người dùng mới phải tham gia `TELEGRAM_REQUIRED_GROUP`, quay lại bot và bấm nút xác nhận; bot gọi `getChatMember` rồi mới cấp nút Web App **Shop MMO**. Chỉ bật công tắc sau khi bot đã được thêm làm Admin của nhóm. Backend cũng kiểm tra cờ xác nhận trong SQLite nên link Web App cũ không thể bỏ qua bước này. Referral, quản lý thiết bị, lịch sử giao hàng và bảo hành được xử lý trực tiếp trong Mini App; người dùng không thể tự sửa hạng hoặc quyền lợi.
 
 Các chức năng người dùng của bot hiện chạy trực tiếp trong Mini App: tạo NFToken theo gói, rút Cookie VIP, nhận Cookie miễn phí, nhập mã Netflix TV, đổi giftcode, tạo yêu cầu nạp tiền và gửi hỗ trợ. Luồng nạp tiền hoạt động hoàn toàn trong app: khách tạo QR, bấm “Tôi đã chuyển tiền”, theo dõi trạng thái; Admin duyệt hoặc từ chối kèm lý do và kết quả tự cập nhật cho khách. Mini App không đóng cuộc trò chuyện Telegram khi thao tác.
 
@@ -19,7 +19,7 @@ Telegram ID trong `TELEGRAM_ADMIN_ID` có thêm Trung tâm quản trị riêng n
 
 Mỗi sản phẩm có hai quyền lợi tách biệt: `nftoken_credits` là số lượt tạo link NFToken đã mua và `credits` là số lượt lấy Cookie VIP. Checkout cộng hai loại lượt trong cùng transaction. Khi tạo NFToken, hệ thống ưu tiên dùng lượt đã mua; nếu hết mới dùng hạn mức hằng ngày của gói. Nếu kiểm tra Cookie thất bại, đúng loại lượt vừa dùng sẽ được hoàn lại.
 
-Admin có thể chọn nhiều file hoặc chọn nguyên thư mục Cookie từ Mini App. Backend chỉ nhận `.txt`, `.zip`, `.rar`, tự bỏ qua file khác, không giải nén ra filesystem, chặn archive mã hóa/ZIP bomb, gom trùng và kiểm tra song song ở nền. Mặc định mỗi lần nhận tối đa 512MB, 10.000 file và 250.000 Cookie; có thể tăng/giảm bằng `INVENTORY_MAX_UPLOAD_MB`, `INVENTORY_MAX_FILE_MB`, `INVENTORY_MAX_FILES`, `INVENTORY_MAX_ENTRIES` trong `.env`. Chỉ tài khoản `CURRENT_MEMBER` tạo được NFToken mới được lưu; giao diện hiển thị tiến độ live/lỗi/trùng và không chặn người dùng khác.
+Admin có thể chọn nhiều file hoặc chọn nguyên thư mục Cookie từ Mini App. Backend nhận `.txt`, `.nem`, `.zip`, `.rar`; report `.nem`/text có dòng `🍪 Cookie:` sẽ chỉ lấy Cookie ở dòng đó và bỏ qua các dòng Phone Login/PC Login. File khác tự bỏ qua, archive không giải nén ra filesystem, archive mã hóa/ZIP bomb bị chặn, dữ liệu trùng được gom và kiểm tra song song ở nền. Mặc định mỗi lần nhận tối đa 512MB, 10.000 file và 250.000 Cookie; có thể tăng/giảm bằng `INVENTORY_MAX_UPLOAD_MB`, `INVENTORY_MAX_FILE_MB`, `INVENTORY_MAX_FILES`, `INVENTORY_MAX_ENTRIES` trong `.env`. Chỉ tài khoản `CURRENT_MEMBER` tạo được NFToken mới được lưu; giao diện hiển thị tiến độ live/lỗi/trùng và không chặn người dùng khác.
 
 ## Windows Server 2022
 
@@ -53,7 +53,7 @@ Mở terminal thứ hai với cùng biến môi trường:
 python code_goc.py
 ```
 
-Mini App production bắt buộc HTTPS. Reverse proxy domain HTTPS đến `127.0.0.1:8080`, đặt URL đó vào `TELEGRAM_MINIAPP_URL`, sau đó cấu hình cùng URL trong BotFather (`/newapp` hoặc `/myapps`). Nút Mini App chỉ xuất hiện khi biến này bắt đầu bằng `https://`; menu bot chỉ hiển thị **Shop MMO**.
+Mini App production bắt buộc HTTPS. Reverse proxy domain HTTPS đến `127.0.0.1:8080`, đặt URL đó vào `TELEGRAM_MINIAPP_URL`, sau đó cấu hình cùng URL trong BotFather (`/newapp` hoặc `/myapps`). Không đặt Web App làm menu button toàn cục vì sẽ bỏ qua cổng thành viên; nút **Shop MMO** chỉ được bot gửi riêng sau khi xác nhận thành công.
 
 Để nút nạp tiền tạo QR VietQR, cấu hình thêm `VIETQR_BANK_BIN`, `VIETQR_ACCOUNT_NUMBER` và `VIETQR_ACCOUNT_NAME`. Nếu chưa cấu hình, yêu cầu nạp vẫn được tạo nhưng giao diện chỉ hiển thị nội dung chuyển khoản. Giao dịch chỉ chuyển sang trạng thái chờ Admin sau khi khách bấm xác nhận đã chuyển tiền; không cần quay lại bot Telegram.
 

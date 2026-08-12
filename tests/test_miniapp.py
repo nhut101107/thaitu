@@ -51,10 +51,15 @@ class MiniAppTest(unittest.TestCase):
         connection.commit()
         connection.close()
         miniapp_server.migrate()
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute("UPDATE users SET group_verified=1,group_member_status='member'")
+        connection.commit()
+        connection.close()
         miniapp_server.TOOL_ATTEMPTS.clear()
         miniapp_server.CHECKOUT_ATTEMPTS.clear()
         os.environ["TELEGRAM_BOT_TOKEN"] = TOKEN
         os.environ["TELEGRAM_ADMIN_ID"] = "1"
+        miniapp_server.GROUP_GATE_ENABLED = True
         miniapp_server.app.config["TESTING"] = True
         self.client = miniapp_server.app.test_client()
         self.headers = {"X-Telegram-Init-Data": signed_init_data(1)}
@@ -80,6 +85,27 @@ class MiniAppTest(unittest.TestCase):
     def test_rejects_missing_or_tampered_init_data(self):
         self.assertEqual(self.client.get("/api/bootstrap").status_code, 401)
         self.assertEqual(self.client.get("/api/bootstrap", headers={"X-Telegram-Init-Data": signed_init_data(1) + "x"}).status_code, 401)
+
+    def test_group_membership_is_required_before_miniapp_access(self):
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute(
+            "UPDATE users SET group_verified=0,group_verified_at=NULL WHERE user_id=2"
+        )
+        connection.commit()
+        connection.close()
+        headers = {"X-Telegram-Init-Data": signed_init_data(2)}
+        blocked = self.client.get("/api/bootstrap", headers=headers)
+        self.assertEqual(blocked.status_code, 403)
+        self.assertEqual(blocked.json["reason_code"], "group_membership_required")
+        self.assertEqual(blocked.json["join_url"], "https://t.me/mnhutgroup")
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute(
+            "UPDATE users SET group_verified=1,group_member_status='member' WHERE user_id=2"
+        )
+        connection.commit()
+        connection.close()
+        allowed = self.client.get("/api/bootstrap", headers=headers)
+        self.assertEqual(allowed.status_code, 200)
 
     def test_pwa_session_can_reopen_authenticated_app_without_telegram_init_data(self):
         issued = self.client.post("/api/pwa/session", json={}, headers=self.headers)

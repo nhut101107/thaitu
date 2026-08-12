@@ -17,7 +17,6 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     MenuButtonDefault,
-    MenuButtonWebApp,
     WebAppInfo,
 )
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
@@ -36,6 +35,10 @@ DATABASE_PATH = os.getenv('BOT_DATABASE_PATH', os.path.join(APP_DIR, 'bot_databa
 TOKEN_FILE = os.path.join(APP_DIR, 'tokenbot.txt')
 ADMIN_ID = int(os.getenv('TELEGRAM_ADMIN_ID', '5992662564'))
 TV_LOGIN_DEADLINE_SECONDS = 90.0
+REQUIRED_GROUP_CHAT = os.getenv('TELEGRAM_REQUIRED_GROUP', '@mnhutgroup').strip() or '@mnhutgroup'
+REQUIRED_GROUP_URL = os.getenv('TELEGRAM_REQUIRED_GROUP_URL', 'https://t.me/mnhutgroup').strip() or 'https://t.me/mnhutgroup'
+GROUP_GATE_ENABLED = os.getenv('TELEGRAM_GROUP_GATE_ENABLED', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
+GROUP_MEMBER_STATUSES = {'member', 'administrator', 'creator', 'owner'}
 
 def get_connection():
     return sqlite3.connect(DATABASE_PATH, timeout=30, check_same_thread=False)
@@ -49,6 +52,14 @@ def init_db():
                  (user_id INTEGER PRIMARY KEY, username TEXT, balance INTEGER DEFAULT 0,
                   credits INTEGER DEFAULT 0, plan_name TEXT DEFAULT 'FREE', is_banned INTEGER DEFAULT 0,
                   last_active TEXT)''')
+    user_columns = {row[1] for row in c.execute("PRAGMA table_info(users)")}
+    for name, definition in {
+        'group_verified': 'INTEGER DEFAULT 0',
+        'group_verified_at': 'TEXT',
+        'group_member_status': "TEXT DEFAULT ''",
+    }.items():
+        if name not in user_columns:
+            c.execute(f"ALTER TABLE users ADD COLUMN {name} {definition}")
     c.execute('''CREATE TABLE IF NOT EXISTS plans
                  (name TEXT PRIMARY KEY, tokens_max INTEGER, cookies_max INTEGER)''')
     c.execute('''CREATE TABLE IF NOT EXISTS premium_cookies
@@ -248,6 +259,50 @@ def get_user(user_id, username):
     conn.commit()
     conn.close()
     return res
+
+def set_group_verification(user_id, verified, status=''):
+    """Persist only the membership decision; never store Telegram API payloads."""
+    conn = get_connection()
+    try:
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S') if verified else None
+        conn.execute(
+            """UPDATE users SET group_verified=?,group_verified_at=?,group_member_status=?
+               WHERE user_id=?""",
+            (1 if verified else 0, now, str(status or '')[:24], int(user_id)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+def is_group_verified(user_id):
+    if int(user_id) == ADMIN_ID:
+        return True
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT group_verified FROM users WHERE user_id=?", (int(user_id),)
+        ).fetchone()
+        return bool(row and row[0])
+    finally:
+        conn.close()
+
+def telegram_member_is_allowed(member):
+    status = str(getattr(member, 'status', '') or '').lower()
+    if status in GROUP_MEMBER_STATUSES:
+        return True
+    return status == 'restricted' and bool(getattr(member, 'is_member', False))
+
+async def check_required_group_membership(bot, user_id):
+    """Return True/False, or None when Telegram cannot verify safely."""
+    try:
+        member = await bot.get_chat_member(chat_id=REQUIRED_GROUP_CHAT, user_id=int(user_id))
+        return telegram_member_is_allowed(member)
+    except Exception as exc:
+        logger.error(
+            "Telegram group verification failed user_id=%s error_type=%s",
+            int(user_id), type(exc).__name__,
+        )
+        return None
 
 def get_user_economy(user_id):
     conn = get_connection()
@@ -603,6 +658,7 @@ MAX_ZIP_UNCOMPRESSED_SIZE = 100 * 1024 * 1024
 MAX_RETRIES = 3
 RETRY_BACKOFF = 1
 REQUEST_TIMEOUT = 30
+PLAIN_COOKIE_EXTENSIONS = {'.txt', '.nem'}
 BOT_VERSION = "4.5 PRO ULTRA"
 BOT_NAME = "NFToken Pro"
 
@@ -656,7 +712,7 @@ SPAM_LIMIT = 6
 SPAM_WINDOW = 5
 SPAM_COOLDOWN = 20
 
-async def check_user_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+async def check_user_status(update: Update, context: ContextTypes.DEFAULT_TYPE, require_group=True) -> bool:
     user = update.effective_user
     if not user: return False
     user_id = user.id
@@ -672,6 +728,12 @@ async def check_user_status(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         msg = update.message or (update.callback_query.message if update.callback_query else None)
         if msg:
             await msg.reply_text("🚫 *Tài khoản của bạn đã bị KHÓA!*\nVui lòng liên hệ Admin để được hỗ trợ.", parse_mode='Markdown')
+        return False
+
+    if GROUP_GATE_ENABLED and require_group and user_id != ADMIN_ID and not is_group_verified(user_id):
+        msg = update.message or (update.callback_query.message if update.callback_query else None)
+        if msg:
+            await msg.reply_text(group_gate_text(), parse_mode='Markdown', reply_markup=kb_group_gate())
         return False
 
     if user_id != ADMIN_ID:
@@ -1004,6 +1066,15 @@ class NetflixTokenChecker:
         for line in text.splitlines():
             line = line.strip()
             if not line or line.startswith('#'):
+                continue
+
+            # Reports exported by the "nem" checker contain account metadata,
+            # phone/PC login links and one authoritative Cookie line.  Only
+            # parse that Cookie line so login URLs cannot become fake cookies.
+            report_cookie = re.match(r'^🍪\s*Cookie\s*:\s*(.*)$', line, re.IGNORECASE)
+            if report_cookie:
+                line = report_cookie.group(1).strip()
+            elif re.match(r'^•\s*(?:Phone|PC)\s+Login\b', line, re.IGNORECASE):
                 continue
 
             parts = line.split('\t')
@@ -2600,21 +2671,32 @@ def kb_main():
         rows.append([InlineKeyboardButton("📱 Shop MMO", web_app=WebAppInfo(url=miniapp_url))])
     return InlineKeyboardMarkup(rows)
 
+def kb_group_gate():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👥 Tham gia nhóm mnhutgroup", url=REQUIRED_GROUP_URL)],
+        [InlineKeyboardButton("✅ Tôi đã tham gia — Xác nhận", callback_data='verify_required_group')],
+    ])
+
+def group_gate_text(verification_unavailable=False):
+    detail = (
+        "Telegram chưa thể kiểm tra thành viên lúc này. Hãy chắc chắn bot đã được thêm làm Admin của nhóm rồi thử lại."
+        if verification_unavailable else
+        "Bạn cần tham gia nhóm trước khi sử dụng Shop MMO."
+    )
+    return (
+        "🔒 *XÁC NHẬN THÀNH VIÊN*\n\n"
+        f"{detail}\n\n"
+        "1. Bấm *Tham gia nhóm mnhutgroup*.\n"
+        "2. Tham gia nhóm.\n"
+        "3. Quay lại bot và bấm *Tôi đã tham gia — Xác nhận*."
+    )
+
 async def reset_bot_menu(application):
-    """Show only the Shop MMO Mini App in Telegram's menu."""
+    """Do not expose a global WebApp button that bypasses membership checks."""
     try:
-        miniapp_url = os.getenv("TELEGRAM_MINIAPP_URL", "").strip()
-        if not miniapp_url.startswith("https://"):
-            raise RuntimeError("TELEGRAM_MINIAPP_URL must be HTTPS")
         await application.bot.set_my_commands([])
         await application.bot.set_chat_menu_button(menu_button=MenuButtonDefault())
-        await application.bot.set_chat_menu_button(
-            menu_button=MenuButtonWebApp(
-                text="Shop MMO",
-                web_app=WebAppInfo(url=miniapp_url),
-            )
-        )
-        logger.info("Telegram menu configured with Shop MMO Mini App")
+        logger.info("Telegram menu configured for membership-gated Shop MMO access")
     except Exception as exc:
         logger.error("Không thể đặt lại menu Telegram error_type=%s", type(exc).__name__)
 
@@ -2688,12 +2770,20 @@ async def cmd_giftcode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else: await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ {msg}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_user_status(update, context): return
+    if not await check_user_status(update, context, require_group=False): return
     try: await update.message.delete()
     except: pass
     user = update.effective_user
     name = user.first_name.replace("_", "").replace("*", "").replace("`", "").replace("[", "") if user and user.first_name else "bạn"
     get_user(user.id, user.username)
+    if GROUP_GATE_ENABLED and user.id != ADMIN_ID and not is_group_verified(user.id):
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=group_gate_text(),
+            parse_mode='Markdown',
+            reply_markup=kb_group_gate(),
+        )
+        return
     balance, credits = get_user_economy(user.id)
     await context.bot.send_message(chat_id=update.effective_chat.id, text=banner_main(user.id, name, balance, credits), parse_mode='Markdown', reply_markup=kb_main())
 
@@ -2806,11 +2896,40 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(chat_id=update.effective_chat.id, text=f"✅ Đã gửi thành công: {success}/{len(users)}")
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await check_user_status(update, context): return
     query = update.callback_query
+    verifying_group = bool(query and query.data == 'verify_required_group')
+    if not await check_user_status(update, context, require_group=not verifying_group): return
     await query.answer()
     user = update.effective_user
     name = user.first_name.replace("_", "").replace("*", "").replace("`", "").replace("[", "") if user and user.first_name else "bạn"
+
+    if verifying_group:
+        get_user(user.id, user.username)
+        membership = await check_required_group_membership(context.bot, user.id)
+        if membership is None:
+            set_group_verification(user.id, False, 'unavailable')
+            await query.edit_message_text(
+                group_gate_text(verification_unavailable=True),
+                parse_mode='Markdown',
+                reply_markup=kb_group_gate(),
+            )
+            return
+        if not membership:
+            set_group_verification(user.id, False, 'not_member')
+            await query.edit_message_text(
+                "❌ *Telegram chưa thấy bạn trong nhóm.*\n\nHãy bấm tham gia nhóm, hoàn tất tham gia rồi quay lại xác nhận.",
+                parse_mode='Markdown',
+                reply_markup=kb_group_gate(),
+            )
+            return
+        set_group_verification(user.id, True, 'member')
+        balance, credits = get_user_economy(user.id)
+        await query.edit_message_text(
+            banner_main(user.id, name, balance, credits),
+            parse_mode='Markdown',
+            reply_markup=kb_main(),
+        )
+        return
 
     if query.data == 'menu_tv_log':
         avail = get_premium_cookie_count()
@@ -3135,12 +3254,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == 'admin_upload_fast_vip':
         if user.id != ADMIN_ID: return
-        await query.edit_message_text("⚡ *NẠP NHANH*\n\nVui lòng tải lên file `.txt` hoặc `.zip` chứa cookie.\nBot sẽ nạp thẳng tất cả vào kho VIP mà *không check*.", parse_mode='Markdown', reply_markup=kb_admin())
+        await query.edit_message_text("⚡ *NẠP NHANH*\n\nVui lòng tải lên file `.txt`, `.nem` hoặc `.zip` chứa cookie.\nBot sẽ nạp thẳng tất cả vào kho VIP mà *không check*.", parse_mode='Markdown', reply_markup=kb_admin())
         context.user_data['awaiting'] = 'admin_upload_cookie_vip_fast'
 
     elif query.data == 'admin_upload_check_vip':
         if user.id != ADMIN_ID: return
-        await query.edit_message_text("🔍 *CHECK & NẠP (ĐA LUỒNG)*\n\nVui lòng tải lên file `.txt` hoặc `.zip` chứa cookie.\nBot sẽ kiểm tra đa luồng (15 workers) và chỉ nạp cookie *SỐNG (Current Member)* vào kho.", parse_mode='Markdown', reply_markup=kb_admin())
+        await query.edit_message_text("🔍 *CHECK & NẠP (ĐA LUỒNG)*\n\nVui lòng tải lên file `.txt`, `.nem` hoặc `.zip` chứa cookie.\nBot sẽ kiểm tra đa luồng (15 workers) và chỉ nạp cookie *SỐNG (Current Member)* vào kho.", parse_mode='Markdown', reply_markup=kb_admin())
         context.user_data['awaiting'] = 'admin_upload_cookie_vip'
 
     elif query.data == 'admin_cookie_inventory':
@@ -3662,8 +3781,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if current_awaiting not in ['admin_upload_cookie_vip', 'admin_upload_cookie_free', 'admin_upload_cookie_vip_fast', 'admin_upload_cookie_spotify']:
         if user_id == ADMIN_ID and update.message.document:
-            fname = update.message.document.file_name or ''
-            if fname.endswith('.txt') or fname.endswith('.zip') or fname.endswith('.rar'): current_awaiting = 'admin_upload_cookie_vip'
+            fname = (update.message.document.file_name or '').lower()
+            if os.path.splitext(fname)[1] in PLAIN_COOKIE_EXTENSIONS or fname.endswith('.zip') or fname.endswith('.rar'): current_awaiting = 'admin_upload_cookie_vip'
             else: return
         else: return
 
@@ -3812,7 +3931,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if filename.endswith('.zip'):
             with zipfile.ZipFile(file_content_buf) as zip_file:
                 validate_zip_archive(zip_file)
-                for txt_file in [f for f in zip_file.namelist() if f.endswith('.txt')]:
+                for txt_file in [f for f in zip_file.namelist() if os.path.splitext(f.lower())[1] in PLAIN_COOKIE_EXTENSIONS]:
                     if active_tasks.get(chat_id, False):
                         await status_msg.edit_text(f"⏹ *Đã dừng*\n\n  {FOOTER}", parse_mode='Markdown')
                         active_tasks.pop(chat_id, None)
@@ -3822,16 +3941,17 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif filename.endswith('.rar'):
             with rarfile.RarFile(file_content_buf) as rar_file:
                 validate_rar_archive(rar_file)
-                for txt_file in [f for f in rar_file.namelist() if f.endswith('.txt')]:
+                for txt_file in [f for f in rar_file.namelist() if os.path.splitext(f.lower())[1] in PLAIN_COOKIE_EXTENSIONS]:
                     if active_tasks.get(chat_id, False):
                         await status_msg.edit_text(f"⏹ *Đã dừng*\n\n  {FOOTER}", parse_mode='Markdown')
                         active_tasks.pop(chat_id, None)
                         return
                     with rar_file.open(txt_file) as f:
                         all_cookies.extend(checker.extract_cookies_from_text(f.read().decode('utf-8', errors='ignore')))
-        elif filename.endswith('.txt'): all_cookies = checker.extract_cookies_from_text(file_content_buf.read().decode('utf-8', errors='ignore'))
+        elif os.path.splitext(filename.lower())[1] in PLAIN_COOKIE_EXTENSIONS:
+            all_cookies = checker.extract_cookies_from_text(file_content_buf.read().decode('utf-8', errors='ignore'))
         else:
-            await status_msg.edit_text(f"❌ Chỉ hỗ trợ `.txt`, `.zip` và `.rar`\n\n  {FOOTER}", parse_mode='Markdown', reply_markup=kb_done())
+            await status_msg.edit_text(f"❌ Chỉ hỗ trợ `.txt`, `.nem`, `.zip` và `.rar`\n\n  {FOOTER}", parse_mode='Markdown', reply_markup=kb_done())
             return
 
         if not all_cookies:

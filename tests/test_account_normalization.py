@@ -1,7 +1,10 @@
+import asyncio
 import json
 from pathlib import Path
 import re
+from types import SimpleNamespace
 import unittest
+from unittest.mock import AsyncMock
 
 import code_goc
 from account_normalization import (
@@ -197,18 +200,56 @@ class AccountNormalizationTest(unittest.TestCase):
         self.assertNotIn("Mở NFToken Mini App", source)
         self.assertNotIn("MỞ NFToken MINI APP", source)
         self.assertNotIn("/app", source)
-        self.assertIn("MenuButtonWebApp", source)
+        self.assertNotIn("MenuButtonWebApp", source)
+        self.assertIn("WebAppInfo", source)
 
     def test_bot_menu_exposes_only_shop_mmo_mini_app(self):
         source = Path(code_goc.__file__).read_text(encoding="utf-8")
         registered_commands = re.findall(r'application\.add_handler\(CommandHandler\("([^"]+)"', source)
         self.assertEqual(registered_commands, ["start"])
         self.assertNotIn("/app", source)
-        self.assertIn("MenuButtonWebApp", source)
         self.assertIn("Shop MMO", source)
         self.assertIn("set_my_commands([])", source)
+        self.assertNotIn("MenuButtonWebApp", source)
+        self.assertIn("verify_required_group", source)
+        self.assertIn("https://t.me/mnhutgroup", source)
         self.assertNotIn("callback_data='store_main'", source)
         self.assertNotIn("callback_data='deposit_main'", source)
+
+    def test_telegram_group_membership_statuses_and_api_check(self):
+        self.assertTrue(code_goc.telegram_member_is_allowed(SimpleNamespace(status="member")))
+        self.assertTrue(code_goc.telegram_member_is_allowed(SimpleNamespace(status="administrator")))
+        self.assertTrue(code_goc.telegram_member_is_allowed(SimpleNamespace(status="restricted", is_member=True)))
+        self.assertFalse(code_goc.telegram_member_is_allowed(SimpleNamespace(status="left")))
+        bot = SimpleNamespace(get_chat_member=AsyncMock(return_value=SimpleNamespace(status="member")))
+        allowed = asyncio.run(code_goc.check_required_group_membership(bot, 123))
+        self.assertTrue(allowed)
+        bot.get_chat_member.assert_awaited_once_with(chat_id="@mnhutgroup", user_id=123)
+
+    def test_telegram_group_check_fails_closed_without_logging_payload(self):
+        bot = SimpleNamespace(get_chat_member=AsyncMock(side_effect=TimeoutError("private payload")))
+        with self.assertLogs(code_goc.logger, level="ERROR") as captured:
+            allowed = asyncio.run(code_goc.check_required_group_membership(bot, 123))
+        self.assertIsNone(allowed)
+        self.assertNotIn("private payload", "\n".join(captured.output))
+
+    def test_nem_report_extracts_cookie_lines_and_ignores_login_links(self):
+        report = """🔹 PREMIUM ACCOUNT #1
+🍪 Cookie: NetflixId=demo-one
+• Phone Login https://example.invalid/?NetflixId=must-not-read
+• PC Login https://example.invalid/?NetflixId=must-not-read
+----------------------------------------
+🔹 PREMIUM ACCOUNT #2
+🍪 Cookie: NetflixId=demo-two; SecureNetflixId=secure-two
+"""
+        cookies = code_goc.NetflixTokenChecker().extract_cookies_from_text(report)
+        self.assertEqual(cookies, [
+            {"NetflixId": "demo-one"},
+            {"NetflixId": "demo-two", "SecureNetflixId": "secure-two"},
+        ])
+
+    def test_nem_extension_is_supported_as_plain_cookie_text(self):
+        self.assertIn(".nem", code_goc.PLAIN_COOKIE_EXTENSIONS)
 
 
 if __name__ == "__main__":
