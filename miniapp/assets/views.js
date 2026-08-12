@@ -1,6 +1,6 @@
-import {api} from "./api.js?v=15";
+import {api} from "./api.js?v=17";
 import {state, update} from "./state.js";
-import {copyText, emptyState, escapeHtml, formatMoney, icon, modal, productCard, skeleton, toast} from "./components.js?v=15";
+import {copyText, emptyState, escapeHtml, formatMoney, icon, modal, productCard, skeleton, toast} from "./components.js?v=17";
 
 function section(title, body, action = "") {
   return `<section class="content-section"><div class="section-title"><div><small>Shop MMO</small><h2>${title}</h2></div>${action}</div>${body}</section>`;
@@ -47,12 +47,19 @@ export function ordersView(loading = false) {
 
 export function toolsView() {
   const quota = state.tools?.quota || state.bootstrap.quota || {};
+  const trial = quota.trial || {};
   const stock = state.tools?.stock || {premium: state.bootstrap.inventory.premiumCookies, free: 0};
   const flags = state.tools?.features || state.bootstrap.features || {};
+  const nftokenDescription = trial.nftokenEnabled && trial.nftokenDailyLimit > 0
+    ? `Trải nghiệm còn ${trial.nftokenRemaining || 0}/${trial.nftokenDailyLimit || 0} lượt hôm nay`
+    : `${quota.nftokenCredits || 0} lượt đã mua · ${Math.max(0,(quota.tokensMax || 0)-(quota.tokensUsed || 0))} lượt gói/ngày`;
+  const cookieDescription = trial.cookieEnabled && trial.cookieDailyLimit > 0
+    ? `Trải nghiệm còn ${trial.cookieRemaining || 0}/${trial.cookieDailyLimit || 0} lượt hôm nay`
+    : `${quota.credits || 0} lượt đã mua`;
   const tools = [
     ["📺", "Đăng nhập Netflix TV", "Nhập mã TV và xử lý ngay trong app", "tv", flags.tv],
-    ["⚡", "Tạo link NFToken", `${quota.nftokenCredits || 0} lượt đã mua · ${Math.max(0,(quota.tokensMax || 0)-(quota.tokensUsed || 0))} lượt gói/ngày`, "plan-token", flags.planToken],
-    ["🍪", "Rút Cookie VIP", `${quota.credits || 0} lượt đã mua`, "vip-token", flags.vipToken],
+    ["⚡", "Tạo link NFToken", nftokenDescription, "plan-token", flags.planToken],
+    ["🍪", "Rút Cookie VIP", cookieDescription, "vip-token", flags.vipToken],
     ["🎁", "Cookie miễn phí", `${quota.freeCookiesUsed || 0}/${quota.freeCookiesMax || 0} lượt hôm nay`, "free-cookie", flags.freeCookie],
     ["✅", "Điểm danh Cookie Free", `${state.bootstrap.checkin?.remaining || 0}/${state.bootstrap.checkin?.daily || 2} lượt còn lại hôm nay`, "checkin", true],
     ["🎯", "Nhiệm vụ nhận thưởng", "Hoàn thành nhiệm vụ để nhận lượt NFToken", "missions", true],
@@ -146,10 +153,18 @@ function accountSummary(account = {}) {
 
 export function openNftoken(mode = "plan") {
   const vip = mode === "vip";
+  const trial = (state.tools?.quota || state.bootstrap.quota || {}).trial || {};
+  const trialActive = vip
+    ? trial.cookieEnabled && trial.cookieDailyLimit > 0
+    : trial.nftokenEnabled && trial.nftokenDailyLimit > 0;
+  const trialRemaining = vip ? trial.cookieRemaining : trial.nftokenRemaining;
   const requestId = globalThis.crypto?.randomUUID?.() || `nftoken-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  modal(`<div class="confirm-icon">${vip ? "🍪" : "⚡"}</div><h2>${vip ? "Rút Cookie VIP" : "Tạo NFToken theo gói"}</h2><p>${vip ? "Lượt đã mua sẽ chỉ bị trừ khi tạo thành công." : "Sử dụng hạn mức NFToken hằng ngày của gói hiện tại."}</p>${vip ? '<label class="field">Số lượng<input id="tool-quantity" type="number" min="1" max="5" value="1"></label>' : ""}<button class="button wide" data-run-nftoken>Bắt đầu xử lý</button>`, {onOpen(root, close) {
+  const usageText = trialActive && trialRemaining > 0
+    ? `Bạn còn ${trialRemaining} lượt trải nghiệm hôm nay. Lượt trải nghiệm được dùng trước.`
+    : vip ? "Chỉ trừ lượt Cookie VIP đã mua khi tạo thành công." : "Sử dụng lượt đã mua hoặc hạn mức của gói hiện tại.";
+  modal(`<div class="confirm-icon">${vip ? "🍪" : "⚡"}</div><h2>${vip ? "Rút Cookie VIP" : "Tạo NFToken"}</h2><p>${usageText}</p><button class="button wide" data-run-nftoken>Bắt đầu xử lý</button>`, {onOpen(root, close) {
     root.querySelector("[data-run-nftoken]").onclick = async (event) => {
-      const done = busyButton(event.currentTarget); const quantity = Number(root.querySelector("#tool-quantity")?.value || 1);
+      const done = busyButton(event.currentTarget); const quantity = 1;
       let failed = false;
       try {
         const result = await api.nftoken(mode, quantity, requestId); syncQuota(result.quota); close();

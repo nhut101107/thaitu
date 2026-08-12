@@ -235,3 +235,32 @@ body::after { right: -150px; bottom: 18%; background: #18181b; animation-delay: 
  .notification-item p { margin: 6px 0; opacity: .8; }
  .notification-item small { opacity: .55; }
  .notification-badge { position: absolute; top: -4px; right: -4px; min-width: 16px; height: 16px; border-radius: 999px; background: #dc2626; color: #fff; font-size: 10px; line-height: 16px; font-style: normal; }
+
+/* Keep the dark visual style, but avoid expensive mobile compositing. Telegram
+   WebView devices are touch-first and do not benefit from hover/stagger effects. */
+@media (hover: none), (max-width: 700px) {
+  html { scroll-behavior: auto; }
+  body::before, body::after { animation: none; filter: none; opacity: .12; }
+  .topbar, #bottom-nav, .panel, .product-card, .order-card,
+  .quick-grid > button, .tool-grid button, .admin-section, .admin-row,
+  .admin-ticket, .inventory-cards article, .audit-row, .skeleton,
+  .deposit-item, .result-text, .copy-value {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+  .page, .page > *, .product-grid > *, .horizontal-products > *,
+  .tool-grid > *, .quick-grid > * {
+    animation: none !important;
+  }
+  .brand-mark, .brand-mark::after, .balance-card::before,
+  .button::after, .balance-foot button::after, .auto-product-art::before {
+    animation: none !important;
+  }
+  .product-card, .order-card, .quick-grid > button, .tool-grid button {
+    transition: none !important;
+  }
+  .product-grid > .product-card, .horizontal-products > .product-card {
+    content-visibility: auto;
+    contain-intrinsic-size: 260px;
+  }
+}

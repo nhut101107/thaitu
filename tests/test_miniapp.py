@@ -62,6 +62,21 @@ class MiniAppTest(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def set_trial(self, nftoken=False, cookie=False, nftoken_limit=2, cookie_limit=2):
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        values = {
+            "trial_nftoken_enabled": "1" if nftoken else "0",
+            "trial_nftoken_daily_limit": str(nftoken_limit),
+            "trial_cookie_enabled": "1" if cookie else "0",
+            "trial_cookie_daily_limit": str(cookie_limit),
+        }
+        connection.executemany(
+            "INSERT OR REPLACE INTO miniapp_settings(key,value) VALUES(?,?)",
+            values.items(),
+        )
+        connection.commit()
+        connection.close()
+
     def test_rejects_missing_or_tampered_init_data(self):
         self.assertEqual(self.client.get("/api/bootstrap").status_code, 401)
         self.assertEqual(self.client.get("/api/bootstrap", headers={"X-Telegram-Init-Data": signed_init_data(1) + "x"}).status_code, 401)
@@ -154,9 +169,13 @@ class MiniAppTest(unittest.TestCase):
         self.assertIn('timeoutMs: 90000', api_source)
         self.assertNotIn('tv-note', views_source)
         self.assertNotIn('Credential nhạy cảm đã được ẩn', views_source)
-        self.assertIn('api.js?v=15', Path("miniapp/assets/app.js").read_text(encoding="utf-8"))
+        self.assertIn('api.js?v=17', Path("miniapp/assets/app.js").read_text(encoding="utf-8"))
+        self.assertIn('scheduleRender', Path("miniapp/assets/app.js").read_text(encoding="utf-8"))
         self.assertIn('beforeinstallprompt', Path("miniapp/assets/app.js").read_text(encoding="utf-8"))
-        self.assertIn('shop-mmo-static-v3', Path("miniapp/sw.js").read_text(encoding="utf-8"))
+        self.assertIn('shop-mmo-static-v5', Path("miniapp/sw.js").read_text(encoding="utf-8"))
+        self.assertIn('trial_nftoken_enabled', Path("miniapp/assets/admin.js").read_text(encoding="utf-8"))
+        self.assertNotIn('id="tool-quantity"', views_source)
+        self.assertIn('backdrop-filter: none', Path("miniapp/assets/theme.css").read_text(encoding="utf-8"))
 
     def test_checkout_is_atomic_and_idempotent(self):
         response = self.client.put("/api/cart/1", json={"quantity": 2}, headers=self.headers)
@@ -237,6 +256,7 @@ class MiniAppTest(unittest.TestCase):
         self.assertEqual(second.status_code, 409)
 
     def test_vip_nftoken_is_direct_and_deducts_only_on_success(self):
+        self.set_trial(cookie=False)
         connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
         connection.execute("UPDATE users SET credits=1 WHERE user_id=1")
         connection.execute("INSERT INTO premium_cookies(data) VALUES('NetflixId=premium-cookie')")
@@ -251,6 +271,123 @@ class MiniAppTest(unittest.TestCase):
         self.assertEqual(len(response.json["items"]), 1)
         connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
         self.assertEqual(connection.execute("SELECT credits FROM users WHERE user_id=1").fetchone()[0], 0)
+        connection.close()
+
+    def test_trial_nftoken_is_used_before_paid_credit_and_resets_by_local_date(self):
+        self.set_trial(nftoken=True, nftoken_limit=1)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute("UPDATE users SET nftoken_credits=2 WHERE user_id=1")
+        connection.execute("INSERT INTO trial_usage(user_id,local_date,nftoken_used) VALUES(1,'2000-01-01',99)")
+        connection.execute("INSERT INTO premium_cookies(data) VALUES('NetflixId=trial-one')")
+        connection.execute("INSERT INTO premium_cookies(data) VALUES('NetflixId=paid-two')")
+        connection.commit()
+        connection.close()
+        account = {"membership_status": "CURRENT_MEMBER", "plan": "Premium"}
+        with patch.object(miniapp_server, "run_cookie_check", return_value=(True, "safe-token", None, account, "netscape")):
+            first = self.client.post(
+                "/api/tools/nftoken",
+                json={"mode": "plan", "requestId": "trial-plan-first"},
+                headers=self.headers,
+            )
+            second = self.client.post(
+                "/api/tools/nftoken",
+                json={"mode": "plan", "requestId": "trial-plan-second"},
+                headers=self.headers,
+            )
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json["quota"]["trial"]["nftokenRemaining"], 0)
+        self.assertEqual(second.status_code, 200)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        self.assertEqual(connection.execute("SELECT nftoken_credits FROM users WHERE user_id=1").fetchone()[0], 1)
+        self.assertEqual(
+            connection.execute(
+                "SELECT nftoken_used FROM trial_usage WHERE user_id=1 AND local_date=?",
+                (miniapp_server.local_today(),),
+            ).fetchone()[0],
+            1,
+        )
+        connection.close()
+
+    def test_trial_cookie_is_used_before_paid_credit_and_idempotent(self):
+        self.set_trial(cookie=True, cookie_limit=1)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute("UPDATE users SET credits=1 WHERE user_id=1")
+        connection.execute("INSERT INTO premium_cookies(data) VALUES('NetflixId=trial-cookie')")
+        connection.commit()
+        connection.close()
+        account = {"membership_status": "CURRENT_MEMBER", "plan": "Premium"}
+        with patch.object(miniapp_server, "run_cookie_check", return_value=(True, "safe-token", None, account, "netscape")) as check:
+            first = self.client.post(
+                "/api/tools/nftoken",
+                json={"mode": "vip", "requestId": "trial-cookie-once"},
+                headers=self.headers,
+            )
+            duplicate = self.client.post(
+                "/api/tools/nftoken",
+                json={"mode": "vip", "requestId": "trial-cookie-once"},
+                headers=self.headers,
+            )
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(duplicate.status_code, 200)
+        self.assertTrue(duplicate.json["duplicate"])
+        self.assertEqual(check.call_count, 1)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        self.assertEqual(connection.execute("SELECT credits FROM users WHERE user_id=1").fetchone()[0], 1)
+        self.assertEqual(
+            connection.execute(
+                "SELECT cookie_used FROM trial_usage WHERE user_id=1 AND local_date=?",
+                (miniapp_server.local_today(),),
+            ).fetchone()[0],
+            1,
+        )
+        connection.close()
+
+    def test_failed_trial_request_refunds_trial_and_returns_live_cookie(self):
+        self.set_trial(nftoken=True, nftoken_limit=1)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute("INSERT INTO premium_cookies(data) VALUES('NetflixId=temporary-network-error')")
+        connection.commit()
+        connection.close()
+        with patch.object(miniapp_server, "run_cookie_check", return_value=(False, None, "network_error", {}, None)):
+            response = self.client.post(
+                "/api/tools/nftoken",
+                json={"mode": "plan", "requestId": "trial-refund-network"},
+                headers=self.headers,
+            )
+        self.assertEqual(response.status_code, 409)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        self.assertEqual(
+            connection.execute(
+                "SELECT nftoken_used FROM trial_usage WHERE user_id=1 AND local_date=?",
+                (miniapp_server.local_today(),),
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(connection.execute("SELECT is_used FROM premium_cookies").fetchone()[0], 0)
+        connection.close()
+
+    def test_trial_can_be_locked_and_then_requires_purchased_quota(self):
+        self.set_trial(nftoken=False, cookie=False)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute("INSERT INTO premium_cookies(data) VALUES('NetflixId=unused-when-locked')")
+        connection.commit()
+        connection.close()
+        plan = self.client.post(
+            "/api/tools/nftoken",
+            json={"mode": "plan", "requestId": "trial-plan-locked"},
+            headers=self.headers,
+        )
+        vip = self.client.post(
+            "/api/tools/nftoken",
+            json={"mode": "vip", "requestId": "trial-cookie-locked"},
+            headers=self.headers,
+        )
+        self.assertEqual(plan.status_code, 409)
+        self.assertEqual(plan.json["reason_code"], "nftoken_quota_exhausted")
+        self.assertEqual(vip.status_code, 409)
+        self.assertEqual(vip.json["reason_code"], "cookie_quota_exhausted")
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        self.assertEqual(connection.execute("SELECT is_used FROM premium_cookies").fetchone()[0], 0)
         connection.close()
 
     def test_failed_vip_nftoken_refunds_credit(self):
@@ -434,6 +571,25 @@ class MiniAppTest(unittest.TestCase):
         self.assertEqual(connection.execute("SELECT COUNT(*) FROM miniapp_support WHERE user_id=1").fetchone()[0], 1)
         connection.close()
 
+    def test_giftcode_accepts_legacy_mixed_case_and_bot_normalizes_new_codes(self):
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.execute("INSERT INTO discount_codes(code,amount,uses) VALUES('LegacyGift',3000,1)")
+        connection.commit()
+        connection.close()
+
+        legacy = self.client.post("/api/giftcode", json={"code": " legacygift "}, headers=self.headers)
+        self.assertEqual(legacy.status_code, 200)
+        self.assertEqual(legacy.json["amount"], 3000)
+
+        with patch.object(code_goc, "DATABASE_PATH", miniapp_server.DATABASE_PATH):
+            code_goc.add_discount_code("NewGift", 7000, 1)
+            success, amount = code_goc.use_discount_code(" newgift ", 1)
+        self.assertTrue(success)
+        self.assertEqual(amount, 7000)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        self.assertIsNotNone(connection.execute("SELECT 1 FROM discount_codes WHERE code='NEWGIFT'").fetchone())
+        connection.close()
+
     def test_deposit_is_submitted_and_reviewed_entirely_in_miniapp(self):
         created = self.client.post(
             "/api/deposits", json={"amount": 70000}, headers=self.headers
@@ -589,6 +745,10 @@ class MiniAppTest(unittest.TestCase):
                     "freeCookie": False, "giftcode": True,
                     "deposit": True, "support": True,
                 },
+                "trial": {
+                    "nftokenEnabled": True, "nftokenDailyLimit": 3,
+                    "cookieEnabled": True, "cookieDailyLimit": 4,
+                },
             },
             headers=self.headers,
         )
@@ -615,6 +775,13 @@ class MiniAppTest(unittest.TestCase):
         self.assertEqual(order.status_code, 200)
         dashboard = self.client.get("/api/admin/dashboard", headers=self.headers)
         self.assertEqual(dashboard.json["stats"]["premiumStock"], 2)
+        self.assertEqual(
+            dashboard.json["settings"]["trial"],
+            {
+                "nftokenEnabled": True, "nftokenDailyLimit": 3,
+                "cookieEnabled": True, "cookieDailyLimit": 4,
+            },
+        )
         self.assertEqual(dashboard.json["settings"]["announcement"], "Thông báo kiểm thử")
         self.assertGreaterEqual(len(dashboard.json["audit"]), 3)
         self.assertNotIn("data", dashboard.json)

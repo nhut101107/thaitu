@@ -341,14 +341,20 @@ def add_free_cookie(cookie):
 def use_discount_code(code, user_id):
     conn = get_connection()
     c = conn.cursor()
-    c.execute("SELECT amount, uses FROM discount_codes WHERE code=?", (code,))
+    conn.execute("BEGIN IMMEDIATE")
+    normalized_code = str(code or '').strip().upper()
+    c.execute("SELECT code, amount, uses FROM discount_codes WHERE UPPER(code)=? ORDER BY rowid DESC LIMIT 1", (normalized_code,))
     res = c.fetchone()
-    if res and res[1] > 0:
-        c.execute("UPDATE discount_codes SET uses = uses - 1 WHERE code=?", (code,))
-        c.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (res[0], user_id))
+    if res and res[2] > 0:
+        updated = c.execute("UPDATE discount_codes SET uses = uses - 1 WHERE code=? AND uses>0", (res[0],))
+        if updated.rowcount != 1:
+            conn.rollback()
+            conn.close()
+            return False, "Mã không hợp lệ hoặc đã hết lượt sử dụng."
+        c.execute("UPDATE users SET balance = balance + ? WHERE user_id=?", (res[1], user_id))
         conn.commit()
         conn.close()
-        return True, res[0]
+        return True, res[1]
     conn.close()
     return False, "Mã không hợp lệ hoặc đã hết lượt sử dụng."
 
@@ -530,7 +536,8 @@ def add_token_usage(user_id, count):
 def add_discount_code(code, amount, uses):
     conn = get_connection()
     c = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO discount_codes (code, amount, uses) VALUES (?, ?, ?)", (code, amount, uses))
+    normalized_code = str(code or '').strip().upper()
+    c.execute("INSERT OR REPLACE INTO discount_codes (code, amount, uses) VALUES (?, ?, ?)", (normalized_code, amount, uses))
     conn.commit()
     conn.close()
 

@@ -13,6 +13,7 @@
   font-size: 10px;
   transition: background 0.2s;
 }
+.trial-settings{margin:16px 0;padding:15px;border:1px solid var(--line);border-radius:16px;background:#151517}.trial-settings h3{margin:0 0 5px;font-size:14px}.trial-settings>p{margin:0 0 14px;color:var(--muted);font-size:10px;line-height:1.45}.trial-toggle{display:flex;align-items:center;gap:10px;margin:11px 0;padding:12px;border:1px solid var(--line);border-radius:13px;background:#1c1c1f}.trial-toggle input{width:20px;height:20px;accent-color:#f4f4f5}.trial-toggle span{min-width:0}.trial-toggle b,.trial-toggle small{display:block}.trial-toggle small{margin-top:4px;color:var(--muted);font-size:9px}
 .inventory-cards {
   display: grid;
   grid-template-columns: 1fr 1fr;

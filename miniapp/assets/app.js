@@ -1,8 +1,8 @@
-import {api} from "./api.js?v=15";
+import {api} from "./api.js?v=17";
 import {state, subscribe, update} from "./state.js";
-import {bottomNav, header, toast} from "./components.js?v=15";
-import {accountView, addToCart, claimFreeCookie, homeView, openCart, openCheckin, openDeposit, openGiftcode, openHelp, openMissions, openNftoken, openNotifications, openOrder, openProduct, openReferral, openSupport, openTvLogin, ordersView, storeView, toolsView} from "./views.js?v=15";
-import {adminView, bindAdminEvents, loadAdmin} from "./admin.js?v=15";
+import {bottomNav, header, toast} from "./components.js?v=17";
+import {accountView, addToCart, claimFreeCookie, homeView, openCart, openCheckin, openDeposit, openGiftcode, openHelp, openMissions, openNftoken, openNotifications, openOrder, openProduct, openReferral, openSupport, openTvLogin, ordersView, storeView, toolsView} from "./views.js?v=17";
+import {adminView, bindAdminEvents, loadAdmin} from "./admin.js?v=17";
 import {translateDom} from "./i18n.js";
 
 const tg = window.Telegram?.WebApp;
@@ -11,6 +11,7 @@ const loading = document.querySelector("#loading");
 const content = document.querySelector("#content");
 let searchTimer;
 let deferredInstallPrompt;
+let renderFrame = 0;
 const PWA_SESSION_KEY = "shop_mmo_pwa_session";
 const isTelegram = Boolean(tg?.initData);
 
@@ -36,6 +37,7 @@ if (tg) {
 }
 
 function render() {
+  renderFrame = 0;
   if (!state.bootstrap) return;
   document.querySelector("#header").innerHTML = header(state.bootstrap.user);
   document.querySelector("#bottom-nav").innerHTML = bottomNav(state.route);
@@ -46,7 +48,12 @@ function render() {
   translateDom(document.querySelector("#app"));
 }
 
-subscribe(render);
+function scheduleRender() {
+  if (renderFrame) return;
+  renderFrame = requestAnimationFrame(() => render());
+}
+
+subscribe(scheduleRender);
 
 async function loadProducts() {
   const result = await api.products({q: state.search, category: state.category, sort: state.sort});
@@ -66,7 +73,7 @@ async function loadTools() {
 
 async function navigate(route) {
   update({route});
-  window.scrollTo({top: 0, behavior: "smooth"});
+  window.scrollTo({top: 0, behavior: "auto"});
   if (route === "orders") await loadOrders();
   if (route === "tools") await loadTools();
   if (route === "admin") await loadAdmin();

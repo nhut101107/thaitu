@@ -407,6 +407,13 @@ def migrate():
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS trial_usage (
+            user_id INTEGER NOT NULL,
+            local_date TEXT NOT NULL,
+            nftoken_used INTEGER NOT NULL DEFAULT 0,
+            cookie_used INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(user_id, local_date)
+        );
         CREATE TABLE IF NOT EXISTS miniapp_admin_audit (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             admin_id INTEGER NOT NULL,
@@ -504,7 +511,9 @@ def migrate():
             ('feature_deposit','1'),
             ('feature_support','1');
         INSERT OR IGNORE INTO miniapp_settings(key,value) VALUES
-            ('feature_referral','1'),('free_cookie_daily_limit','2');
+            ('feature_referral','1'),('free_cookie_daily_limit','2'),
+            ('trial_nftoken_enabled','1'),('trial_nftoken_daily_limit','2'),
+            ('trial_cookie_enabled','1'),('trial_cookie_daily_limit','2');
         INSERT OR IGNORE INTO customer_rank_settings(rank,referral_threshold,spend_threshold,benefits) VALUES
             ('Bronze',0,0,'Hạng mặc định'),('Silver',5,100000,'Ưu đãi Silver'),
             ('Platinum',20,500000,'Ưu đãi Platinum'),('Diamond',50,2000000,'Ưu đãi Diamond');
@@ -815,6 +824,42 @@ def feature_flags(connection):
     return {name: app_setting(connection, key, "1") == "1" for name, key in FEATURE_KEYS.items()}
 
 
+def bounded_setting_int(connection, key, default, minimum=0, maximum=1000):
+    try:
+        value = int(app_setting(connection, key, str(default)))
+    except (TypeError, ValueError):
+        value = int(default)
+    return max(minimum, min(value, maximum))
+
+
+def trial_settings(connection):
+    return {
+        "nftokenEnabled": app_setting(connection, "trial_nftoken_enabled", "1") == "1",
+        "nftokenDailyLimit": bounded_setting_int(connection, "trial_nftoken_daily_limit", 2),
+        "cookieEnabled": app_setting(connection, "trial_cookie_enabled", "1") == "1",
+        "cookieDailyLimit": bounded_setting_int(connection, "trial_cookie_daily_limit", 2),
+    }
+
+
+def trial_payload(connection, user_id):
+    today = local_today()
+    settings = trial_settings(connection)
+    row = connection.execute(
+        "SELECT nftoken_used,cookie_used FROM trial_usage WHERE user_id=? AND local_date=?",
+        (user_id, today),
+    ).fetchone()
+    nftoken_used = int(row["nftoken_used"] or 0) if row else 0
+    cookie_used = int(row["cookie_used"] or 0) if row else 0
+    return {
+        **settings,
+        "date": today,
+        "nftokenUsed": nftoken_used,
+        "nftokenRemaining": max(0, settings["nftokenDailyLimit"] - nftoken_used) if settings["nftokenEnabled"] else 0,
+        "cookieUsed": cookie_used,
+        "cookieRemaining": max(0, settings["cookieDailyLimit"] - cookie_used) if settings["cookieEnabled"] else 0,
+    }
+
+
 def require_feature(connection, name):
     if not feature_flags(connection).get(name, False):
         raise ToolError("Chức năng này đang được Admin tạm tắt", 503)
@@ -907,25 +952,42 @@ def reserve_cookie(connection):
 
 
 def reserve_nftoken_request(connection, user_id, mode):
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = local_today()
     connection.execute("BEGIN IMMEDIATE")
     ensure_user(connection, g.telegram_user)
-    if mode == "vip":
-        updated = connection.execute(
-            "UPDATE users SET credits=credits-1 WHERE user_id=? AND credits>0", (user_id,)
+    trial = trial_settings(connection)
+    trial_kind = "cookie" if mode == "vip" else "nftoken"
+    quota_source = None
+    if trial[f"{trial_kind}Enabled"] and trial[f"{trial_kind}DailyLimit"] > 0:
+        connection.execute(
+            "INSERT OR IGNORE INTO trial_usage(user_id,local_date) VALUES(?,?)",
+            (user_id, today),
         )
-        if updated.rowcount != 1:
-            connection.rollback()
-            raise ToolError("Bạn đã hết lượt Cookie VIP", 409)
-        quota_source = "vip"
-    else:
+        trial_column = "cookie_used" if mode == "vip" else "nftoken_used"
+        consumed = connection.execute(
+            f"UPDATE trial_usage SET {trial_column}={trial_column}+1 "
+            f"WHERE user_id=? AND local_date=? AND {trial_column}<?",
+            (user_id, today, trial[f"{trial_kind}DailyLimit"]),
+        )
+        if consumed.rowcount == 1:
+            quota_source = {"kind": f"trial_{trial_kind}", "date": today}
+    if mode == "vip":
+        if quota_source is None:
+            updated = connection.execute(
+                "UPDATE users SET credits=credits-1 WHERE user_id=? AND credits>0", (user_id,)
+            )
+            if updated.rowcount != 1:
+                connection.rollback()
+                raise ToolError("Bạn đã hết lượt Cookie VIP", 409, "cookie_quota_exhausted")
+            quota_source = {"kind": "vip", "date": today}
+    elif quota_source is None:
         paid = connection.execute(
             """UPDATE users SET nftoken_credits=nftoken_credits-1
                WHERE user_id=? AND nftoken_credits>0""",
             (user_id,),
         )
         if paid.rowcount == 1:
-            quota_source = "paid_nftoken"
+            quota_source = {"kind": "paid_nftoken", "date": today}
         else:
             plan_name = connection.execute(
                 "SELECT plan_name FROM users WHERE user_id=?", (user_id,)
@@ -944,8 +1006,8 @@ def reserve_nftoken_request(connection, user_id, mode):
             )
             if updated.rowcount != 1:
                 connection.rollback()
-                raise ToolError("Bạn đã hết lượt tạo NFToken", 409)
-            quota_source = "daily_nftoken"
+                raise ToolError("Bạn đã hết lượt tạo NFToken", 409, "nftoken_quota_exhausted")
+            quota_source = {"kind": "daily_nftoken", "date": today}
     row = connection.execute(
         "SELECT id, data FROM premium_cookies WHERE is_used=0 ORDER BY RANDOM() LIMIT 1"
     ).fetchone()
@@ -958,14 +1020,22 @@ def reserve_nftoken_request(connection, user_id, mode):
 
 
 def refund_nftoken_request(connection, user_id, quota_source):
-    today = datetime.now().strftime("%Y-%m-%d")
+    source = quota_source if isinstance(quota_source, dict) else {"kind": quota_source, "date": local_today()}
+    kind = source.get("kind")
+    source_date = source.get("date") or local_today()
     connection.execute("BEGIN IMMEDIATE")
-    if quota_source == "vip":
+    if kind == "vip":
         connection.execute("UPDATE users SET credits=credits+1 WHERE user_id=?", (user_id,))
-    elif quota_source == "paid_nftoken":
+    elif kind == "paid_nftoken":
         connection.execute(
             "UPDATE users SET nftoken_credits=nftoken_credits+1 WHERE user_id=?",
             (user_id,),
+        )
+    elif kind in {"trial_nftoken", "trial_cookie"}:
+        trial_column = "nftoken_used" if kind == "trial_nftoken" else "cookie_used"
+        connection.execute(
+            f"UPDATE trial_usage SET {trial_column}=MAX(0,{trial_column}-1) WHERE user_id=? AND local_date=?",
+            (user_id, source_date),
         )
     else:
         connection.execute(
@@ -1584,7 +1654,6 @@ def bootstrap():
             "quota": quota,
             "support": os.getenv("SUPPORT_USERNAME", "@mnhutdznecon"),
             "isAdmin": user_id == configured_admin_id(),
-            "copyright": "© 2026 mnhut. All rights reserved.",
             "copyright": copyright_payload(connection),
             "referral": referral_payload(connection, user_id),
             "checkin": checkin_payload(connection, user_id),
@@ -1617,6 +1686,7 @@ def quota_payload(connection, user_id):
         "freeCookiesMax": plan["cookies_max"] if plan else 0,
         "freeCheckinRemaining": checkin_payload(connection, user_id)["remaining"],
         "freeCheckinDaily": checkin_payload(connection, user_id)["daily"],
+        "trial": trial_payload(connection, user_id),
     }
 
 
@@ -2315,12 +2385,17 @@ def redeem_giftcode():
     user_id = int(g.telegram_user["id"])
     connection.execute("BEGIN IMMEDIATE")
     gift = connection.execute(
-        "SELECT amount,uses,code_type FROM discount_codes WHERE code=?", (code,)
+        "SELECT code,amount,uses,code_type FROM discount_codes WHERE UPPER(code)=? ORDER BY rowid DESC LIMIT 1", (code,)
     ).fetchone()
     if not gift or gift["uses"] <= 0 or str(gift["code_type"] or "BALANCE").upper() != "BALANCE":
         connection.rollback()
         return jsonify({"ok": False, "error": "Mã không hợp lệ hoặc đã hết lượt"}), 409
-    connection.execute("UPDATE discount_codes SET uses=uses-1 WHERE code=?", (code,))
+    updated = connection.execute(
+        "UPDATE discount_codes SET uses=uses-1 WHERE code=? AND uses>0", (gift["code"],)
+    )
+    if updated.rowcount != 1:
+        connection.rollback()
+        return jsonify({"ok": False, "error": "Mã không hợp lệ hoặc đã hết lượt"}), 409
     connection.execute("UPDATE users SET balance=balance+? WHERE user_id=?", (gift["amount"], user_id))
     connection.commit()
     return jsonify({"ok": True, "amount": gift["amount"]})
@@ -2655,6 +2730,7 @@ def admin_dashboard():
             "maintenance": app_setting(connection, "maintenance", "0") == "1",
             "announcement": app_setting(connection, "announcement", ""),
             "features": feature_flags(connection),
+            "trial": trial_settings(connection),
         },
     })
 
@@ -3049,16 +3125,23 @@ def admin_reply_support(ticket_id):
 @app.put("/api/admin/settings")
 @admin_required
 def admin_update_settings():
+    connection = db()
+    current_trial = trial_settings(connection)
     try:
         body = json_body()
         maintenance = bool(body.get("maintenance", False))
         announcement = str(body.get("announcement", "")).strip()
         features = body.get("features", {})
-    except ValueError as error:
-        return jsonify({"ok": False, "error": str(error)}), 400
-    if len(announcement) > 500 or not isinstance(features, dict):
+        trial = body.get("trial", current_trial)
+        if not isinstance(features, dict) or not isinstance(trial, dict):
+            raise TypeError("settings objects required")
+        trial_nftoken_limit = int(trial.get("nftokenDailyLimit", 2))
+        trial_cookie_limit = int(trial.get("cookieDailyLimit", 2))
+    except (AttributeError, TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Hạn mức trải nghiệm phải là số"}), 400
+    if (len(announcement) > 500 or not 0 <= trial_nftoken_limit <= 1000
+            or not 0 <= trial_cookie_limit <= 1000):
         return jsonify({"ok": False, "error": "Cấu hình hệ thống không hợp lệ"}), 400
-    connection = db()
     connection.execute(
         "INSERT OR REPLACE INTO miniapp_settings(key,value) VALUES('maintenance',?)",
         ("1" if maintenance else "0",),
@@ -3072,9 +3155,21 @@ def admin_update_settings():
             "INSERT OR REPLACE INTO miniapp_settings(key,value) VALUES(?,?)",
             (key, "1" if bool(features.get(name, True)) else "0"),
         )
+    trial_values = {
+        "trial_nftoken_enabled": "1" if bool(trial.get("nftokenEnabled", False)) else "0",
+        "trial_nftoken_daily_limit": str(trial_nftoken_limit),
+        "trial_cookie_enabled": "1" if bool(trial.get("cookieEnabled", False)) else "0",
+        "trial_cookie_daily_limit": str(trial_cookie_limit),
+    }
+    for key, value in trial_values.items():
+        connection.execute(
+            "INSERT OR REPLACE INTO miniapp_settings(key,value) VALUES(?,?)", (key, value)
+        )
     admin_audit(
         connection, "settings.update", "miniapp",
-        f"maintenance={int(maintenance)},announcement={bool(announcement)}",
+        (f"maintenance={int(maintenance)},announcement={bool(announcement)},"
+         f"trial_nftoken={trial_values['trial_nftoken_enabled']}:{trial_nftoken_limit},"
+         f"trial_cookie={trial_values['trial_cookie_enabled']}:{trial_cookie_limit}"),
     )
     connection.commit()
     return jsonify({"ok": True})
