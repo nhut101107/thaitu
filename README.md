@@ -11,11 +11,11 @@
 - `premium_cookies`: dùng để hiển thị tồn kho tổng quan; dữ liệu cookie không bao giờ được trả về frontend.
 - `miniapp_cart`, `miniapp_checkouts`: giỏ hàng và khóa idempotency mới, được tạo tự động bởi migration không phá schema cũ.
 
-Bot hiện không có TOTP, referral hoặc quy trình yêu cầu bảo hành. Mini App không hiển thị nút giả cho các chức năng này; đơn hàng chỉ hiển thị thời hạn bảo hành nếu admin cấu hình `warranty_days`.
+Bot chỉ đăng ký `/start` để hỗ trợ Telegram deep-link/referral và mở menu Web App **Shop MMO**. Referral, quản lý thiết bị, lịch sử giao hàng và bảo hành được xử lý trực tiếp trong Mini App; người dùng không thể tự sửa hạng hoặc quyền lợi.
 
 Các chức năng người dùng của bot hiện chạy trực tiếp trong Mini App: tạo NFToken theo gói, rút Cookie VIP, nhận Cookie miễn phí, nhập mã Netflix TV, đổi giftcode, tạo yêu cầu nạp tiền và gửi hỗ trợ. Luồng nạp tiền hoạt động hoàn toàn trong app: khách tạo QR, bấm “Tôi đã chuyển tiền”, theo dõi trạng thái; Admin duyệt hoặc từ chối kèm lý do và kết quả tự cập nhật cho khách. Mini App không đóng cuộc trò chuyện Telegram khi thao tác.
 
-Telegram ID trong `TELEGRAM_ADMIN_ID` có thêm Trung tâm quản trị riêng ngay trong Mini App. Admin có thể quản lý sản phẩm, giá, lượt, bảo hành và trạng thái bán; cấu hình hạn mức NFToken/Cookie của từng gói; cập nhật số dư, lượt, gói và trạng thái khóa của người dùng; duyệt hoặc từ chối nạp tiền; quản lý giftcode, đơn hàng và yêu cầu hỗ trợ; bật chế độ bảo trì, đăng thông báo, bật/tắt từng chức năng và bổ sung kho Cookie Premium/Free. Nhật ký quản trị lưu 100 thao tác gần nhất. Giao diện kho chỉ cho phép ghi thêm và dọn mục đã dùng, không có API đọc ngược nội dung Cookie. Mọi API `/api/admin/*` đều xác thực chữ ký Telegram và kiểm tra lại Admin ID ở backend; việc ẩn nút trên frontend không được dùng làm lớp bảo mật.
+Telegram ID trong `TELEGRAM_ADMIN_ID` có thêm Trung tâm quản trị riêng ngay trong Mini App. Admin có thể quản lý sản phẩm/provider, giá, mã giảm phần trăm, Flash Sale, hạng khách hàng, referral, mission, lượt trial, bảo hành, thiết bị/risk, đối soát thanh toán, người dùng, giftcode, hỗ trợ và kho Cookie. Kho có scan nền, cách ly lỗi mạng và cảnh báo sắp hết; không có API đọc ngược Cookie hoặc API key. Mọi API `/api/admin/*` đều xác thực chữ ký Telegram và kiểm tra lại Admin ID ở backend; việc ẩn nút trên frontend không được dùng làm lớp bảo mật.
 
 Mỗi sản phẩm có hai quyền lợi tách biệt: `nftoken_credits` là số lượt tạo link NFToken đã mua và `credits` là số lượt lấy Cookie VIP. Checkout cộng hai loại lượt trong cùng transaction. Khi tạo NFToken, hệ thống ưu tiên dùng lượt đã mua; nếu hết mới dùng hạn mức hằng ngày của gói. Nếu kiểm tra Cookie thất bại, đúng loại lượt vừa dùng sẽ được hoàn lại.
 
@@ -32,7 +32,7 @@ notepad .env
 powershell -ExecutionPolicy Bypass -File .\start_windows.ps1
 ```
 
-Điền token, Admin ID, URL Mini App HTTPS, đường dẫn SQLite và giới hạn kho trong `.env`. Script tự tạo `.venv`, cài requirements, chạy Mini App và bot thành hai tiến trình; log nằm trong thư mục `logs\\`. Để Telegram truy cập được từ Internet, dùng domain HTTPS qua IIS/reverse proxy hoặc Cloudflare Tunnel trỏ vào `MINIAPP_HOST:MINIAPP_PORT`; không dùng `127.0.0.1` làm URL Telegram.
+Điền token, Admin ID, URL Mini App HTTPS, đường dẫn SQLite và giới hạn kho trong `.env`. Tự tạo giá trị ngẫu nhiên riêng cho `MINIAPP_DOWNLOAD_SECRET`; nếu dùng webhook thanh toán, cấu hình thêm `PAYMENT_WEBHOOK_SECRET` và không chia sẻ hai giá trị này. Script tự tạo `.venv`, cài requirements, chạy Mini App, bot và watchdog; log nằm trong thư mục `logs\\`. Để Telegram truy cập được từ Internet, dùng domain HTTPS qua IIS/reverse proxy hoặc Cloudflare Tunnel trỏ vào `MINIAPP_HOST:MINIAPP_PORT`; không dùng `127.0.0.1` làm URL Telegram.
 
 Trong Admin → Quản lý kho Cookie, chọn “Chọn nhiều file” hoặc “Chọn thư mục”. Có thể đưa cả folder chứa hàng nghìn TXT; file không hỗ trợ sẽ bị bỏ qua, Cookie được lọc live ở nền và kết quả tự cập nhật trên app.
 
@@ -53,13 +53,15 @@ Mở terminal thứ hai với cùng biến môi trường:
 python code_goc.py
 ```
 
-Mini App production bắt buộc HTTPS. Reverse proxy domain HTTPS đến `127.0.0.1:8080`, đặt URL đó vào `TELEGRAM_MINIAPP_URL`, sau đó cấu hình cùng URL trong BotFather (`/newapp` hoặc `/myapps`). Nút Mini App chỉ xuất hiện khi biến này bắt đầu bằng `https://`; các nút bot cũ vẫn được giữ nguyên.
+Mini App production bắt buộc HTTPS. Reverse proxy domain HTTPS đến `127.0.0.1:8080`, đặt URL đó vào `TELEGRAM_MINIAPP_URL`, sau đó cấu hình cùng URL trong BotFather (`/newapp` hoặc `/myapps`). Nút Mini App chỉ xuất hiện khi biến này bắt đầu bằng `https://`; menu bot chỉ hiển thị **Shop MMO**.
 
 Để nút nạp tiền tạo QR VietQR, cấu hình thêm `VIETQR_BANK_BIN`, `VIETQR_ACCOUNT_NUMBER` và `VIETQR_ACCOUNT_NAME`. Nếu chưa cấu hình, yêu cầu nạp vẫn được tạo nhưng giao diện chỉ hiển thị nội dung chuyển khoản. Giao dịch chỉ chuyển sang trạng thái chờ Admin sau khi khách bấm xác nhận đã chuyển tiền; không cần quay lại bot Telegram.
 
 ## Cấu hình sản phẩm mở rộng
 
 Migration tự thêm các cột tương thích ngược vào `store`: `description`, `category`, `image_url`, `featured`, `warranty_days`, `active`, `purchases`. Admin cũ vẫn thêm được gói như trước, đồng thời có thể cập nhật toàn bộ metadata từ Trung tâm quản trị trong Mini App; không có dữ liệu sản phẩm mock trong production.
+
+Provider ngoài dùng adapter generic và phải được Admin cấu hình đúng base URL/API key/product ID theo hợp đồng của nhà cung cấp. Hệ thống không tự đoán API. Checkout gọi provider ngoài transaction ghi SQLite; lỗi/timeout không trừ tiền. Webhook thanh toán chỉ hoạt động sau khi `PAYMENT_WEBHOOK_SECRET` được cấu hình và phía thanh toán gửi chữ ký HMAC đúng hợp đồng endpoint.
 
 ## Bảo mật checkout
 
