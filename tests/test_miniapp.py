@@ -169,10 +169,10 @@ class MiniAppTest(unittest.TestCase):
         self.assertIn('timeoutMs: 90000', api_source)
         self.assertNotIn('tv-note', views_source)
         self.assertNotIn('Credential nhạy cảm đã được ẩn', views_source)
-        self.assertIn('api.js?v=18', Path("miniapp/assets/app.js").read_text(encoding="utf-8"))
+        self.assertIn('api.js?v=19', Path("miniapp/assets/app.js").read_text(encoding="utf-8"))
         self.assertIn('scheduleRender', Path("miniapp/assets/app.js").read_text(encoding="utf-8"))
         self.assertIn('beforeinstallprompt', Path("miniapp/assets/app.js").read_text(encoding="utf-8"))
-        self.assertIn('shop-mmo-static-v6', Path("miniapp/sw.js").read_text(encoding="utf-8"))
+        self.assertIn('shop-mmo-static-v7', Path("miniapp/sw.js").read_text(encoding="utf-8"))
         self.assertIn('trial_nftoken_enabled', Path("miniapp/assets/admin.js").read_text(encoding="utf-8"))
         self.assertNotIn('id="tool-quantity"', views_source)
         i18n_source = Path("miniapp/assets/i18n.js").read_text(encoding="utf-8")
@@ -252,13 +252,16 @@ class MiniAppTest(unittest.TestCase):
         connection.execute("INSERT INTO free_cookies(data) VALUES('NetflixId=free-cookie')")
         connection.commit()
         connection.close()
-        first = self.client.post("/api/tools/free-cookie", json={}, headers=self.headers)
+        account = {"membership_status": "CURRENT_MEMBER", "plan": "Premium"}
+        with patch.object(miniapp_server, "run_cookie_check", return_value=(True, "safe-token", None, account, "netscape")):
+            first = self.client.post("/api/tools/free-cookie", json={"requestId": "free-cookie-first"}, headers=self.headers)
         self.assertEqual(first.status_code, 200)
         self.assertEqual(first.json["cookie"], "NetflixId=free-cookie")
         connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
-        self.assertEqual(connection.execute("SELECT is_used FROM free_cookies WHERE data='NetflixId=free-cookie'").fetchone()[0], 1)
+        self.assertEqual(connection.execute("SELECT is_used FROM free_cookies WHERE data='NetflixId=free-cookie'").fetchone()[0], 0)
+        self.assertEqual(connection.execute("SELECT COUNT(*) FROM delivery_events WHERE user_id=1 AND kind='free_cookie'").fetchone()[0], 1)
         connection.close()
-        second = self.client.post("/api/tools/free-cookie", json={}, headers=self.headers)
+        second = self.client.post("/api/tools/free-cookie", json={"requestId": "free-cookie-second"}, headers=self.headers)
         self.assertEqual(second.status_code, 409)
 
     def test_vip_nftoken_is_direct_and_deducts_only_on_success(self):

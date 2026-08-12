@@ -1,6 +1,6 @@
-import {api} from "./api.js?v=18";
+import {api} from "./api.js?v=19";
 import {state, update} from "./state.js";
-import {copyText, emptyState, escapeHtml, formatMoney, icon, modal, productCard, skeleton, toast} from "./components.js?v=18";
+import {copyText, emptyState, escapeHtml, formatMoney, icon, modal, productCard, skeleton, toast} from "./components.js?v=19";
 
 function section(title, body, action = "") {
   return `<section class="content-section"><div class="section-title"><div><small>Shop MMO</small><h2>${title}</h2></div>${action}</div>${body}</section>`;
@@ -77,7 +77,7 @@ export function accountView() {
   const initials = escapeHtml((user.firstName || "N")[0]);
   const avatar = user.photoUrl ? `<img src="${escapeHtml(user.photoUrl)}" alt="">` : initials;
   return `<div class="page account-page"><div class="profile-hero"><div class="profile-avatar">${avatar}</div><h1>${escapeHtml(`${user.firstName} ${user.lastName}`.trim())}</h1><p>${user.username ? `@${escapeHtml(user.username)}` : "Chưa đặt username"}</p><span>♕ ${escapeHtml(user.plan)}</span></div>
-    <section class="panel account-list"><header><h2>Tài khoản</h2><small>An toàn & bảo mật</small></header><button data-action="deposit"><i>${icon("wallet")}</i><span><b>Số dư ví</b><small>${formatMoney(user.balance)} · Chạm để nạp</small></span>${icon("arrow")}</button><button><i>⚡</i><span><b>Lượt tạo link NFToken</b><small>${user.nftokenCredits || 0} lượt đã mua</small></span></button><button><i>🍪</i><span><b>Lượt lấy Cookie VIP</b><small>${user.credits} lượt đã mua</small></span></button><button data-route="orders"><i>${icon("orders")}</i><span><b>Lịch sử đơn hàng</b><small>${user.orderCount} đơn đã mua</small></span>${icon("arrow")}</button><button data-action="support"><i>${icon("account")}</i><span><b>Hỗ trợ trực tiếp</b><small>Gửi yêu cầu ngay trong app</small></span>${icon("arrow")}</button></section>
+    <section class="panel account-list"><header><h2>Tài khoản</h2><small>An toàn & bảo mật</small></header><button data-action="deposit"><i>${icon("wallet")}</i><span><b>Số dư ví</b><small>${formatMoney(user.balance)} · Chạm để nạp</small></span>${icon("arrow")}</button><button><i>⚡</i><span><b>Lượt tạo link NFToken</b><small>${user.nftokenCredits || 0} lượt đã mua</small></span></button><button><i>🍪</i><span><b>Lượt lấy Cookie VIP</b><small>${user.credits} lượt đã mua</small></span></button><button data-route="orders"><i>${icon("orders")}</i><span><b>Lịch sử đơn hàng</b><small>${user.orderCount} đơn đã mua</small></span>${icon("arrow")}</button><button data-action="deliveries"><i>✓</i><span><b>Lịch sử giao hàng & bảo hành</b><small>Xem kết quả đã giao và yêu cầu bảo hành</small></span>${icon("arrow")}</button><button data-action="devices"><i>${icon("shield")}</i><span><b>Thiết bị đăng nhập</b><small>Quản lý các thiết bị đang sử dụng</small></span>${icon("arrow")}</button><button data-action="support"><i>${icon("account")}</i><span><b>Hỗ trợ trực tiếp</b><small>Gửi yêu cầu ngay trong app</small></span>${icon("arrow")}</button></section>
     <section class="panel language-panel"><label class="field">Ngôn ngữ<select data-language><option value="vi" ${user.language === "vi" ? "selected" : ""}>Tiếng Việt</option><option value="en" ${user.language === "en" ? "selected" : ""}>English</option></select></label></section>
     ${state.bootstrap.isAdmin ? `<button class="admin-entry" data-route="admin"><i>♛</i><span><b>Trung tâm quản trị</b><small>Quản lý toàn bộ hệ thống ngay trong Mini App</small></span>${icon("arrow")}</button>` : ""}
     <section class="panel commitments"><header><h2>Chính sách & cam kết</h2></header><p>♢ <span><b>Minh bạch gói dịch vụ</b><small>Thông tin lượt và giá được đọc trực tiếp từ hệ thống.</small></span></p><p>⚡ <span><b>Giao lượt tức thì</b><small>Lượt Cookie được cộng sau khi giao dịch thành công.</small></span></p><p>▣ <span><b>Chỉ xử lý sau thanh toán</b><small>Backend kiểm tra lại giá và số dư trong một transaction.</small></span></p></section>
@@ -162,12 +162,26 @@ export function openNftoken(mode = "plan") {
   const usageText = trialActive && trialRemaining > 0
     ? `Bạn còn ${trialRemaining} lượt trải nghiệm hôm nay. Lượt trải nghiệm được dùng trước.`
     : vip ? "Chỉ trừ lượt Cookie VIP đã mua khi tạo thành công." : "Sử dụng lượt đã mua hoặc hạn mức của gói hiện tại.";
-  modal(`<div class="confirm-icon">${vip ? "🍪" : "⚡"}</div><h2>${vip ? "Rút Cookie VIP" : "Tạo NFToken"}</h2><p>${usageText}</p><button class="button wide" data-run-nftoken>Bắt đầu xử lý</button>`, {onOpen(root, close) {
+  modal(`<div class="confirm-icon">${vip ? "🍪" : "⚡"}</div><h2>${vip ? "Rút Cookie VIP" : "Tạo NFToken"}</h2><p>${usageText}</p><button class="button wide" data-run-nftoken>Bắt đầu xử lý</button><button class="button secondary wide hidden" data-cancel-nftoken>Hủy job đang chờ</button><small data-job-state></small>`, {onOpen(root, close) {
+    let cancelled = false;
+    root.querySelector("[data-cancel-nftoken]").onclick = async () => { try { await api.cancelNftokenJob(requestId); cancelled = true; close(); toast("Đã hủy job đang chờ"); } catch (error) { toast(error.message, "error"); } };
     root.querySelector("[data-run-nftoken]").onclick = async (event) => {
       const done = busyButton(event.currentTarget); const quantity = 1;
       let failed = false;
       try {
-        const result = await api.nftoken(mode, quantity, requestId); syncQuota(result.quota); close();
+        let result = await api.nftoken(mode, quantity, requestId, true);
+        if (["queued", "running"].includes(result.status)) {
+          root.querySelector("[data-cancel-nftoken]").classList.remove("hidden");
+          const deadline = Date.now() + 95000;
+          while (!cancelled && root.isConnected && ["queued", "running"].includes(result.status) && Date.now() < deadline) {
+            root.querySelector("[data-job-state]").textContent = result.status === "queued" ? "Đang chờ máy chủ xử lý..." : "Đang kiểm tra Cookie...";
+            await new Promise((resolve) => setTimeout(resolve, 1200));
+            result = await api.nftokenJob(requestId);
+          }
+          if (cancelled || !root.isConnected) return;
+          if (["queued", "running"].includes(result.status)) throw Object.assign(new Error("Máy chủ xử lý quá lâu, kết quả vẫn được lưu trong lịch sử giao hàng"), {reasonCode:"nftoken_timeout"});
+        }
+        syncQuota(result.quota); close();
         modal(`<div class="confirm-icon">✓</div><h2>Tạo thành công ${result.items.length} NFToken</h2>${result.items.map((item, index) => `<article class="token-result"><b>Tài khoản ${index + 1}</b>${accountSummary(item.account)}<a class="button wide" href="${escapeHtml(item.link)}" target="_blank" rel="noopener">Mở Netflix</a>${item.downloadUrl ? `<a class="button secondary wide" href="${escapeHtml(item.downloadUrl)}">Tải file NFToken bảo mật</a>` : ""}<button class="button secondary wide" data-copy-link="${escapeHtml(item.link)}">Sao chép link</button></article>`).join("")}`, {onOpen(resultRoot) { resultRoot.querySelectorAll("[data-copy-link]").forEach((button) => button.onclick = () => copyText(button.dataset.copyLink)); }});
       } catch (error) {
         failed = true;
@@ -187,8 +201,10 @@ export function claimFreeCookie() {
   modal(`<div class="confirm-icon">🎁</div><h2>Cookie miễn phí</h2><p>Cookie được lấy theo đúng hạn mức gói của bạn.</p><button class="button wide" data-claim-free>Nhận Cookie ngay</button>`, {onOpen(root, close) {
     root.querySelector("[data-claim-free]").onclick = async (event) => {
       const done = busyButton(event.currentTarget);
-      try { const result = await api.freeCookie(); syncQuota(result.quota); state.bootstrap.checkin = result.checkin || state.bootstrap.checkin; close(); modal(`<div class="confirm-icon">✓</div><h2>Cookie của bạn</h2><p class="privacy-banner">${escapeHtml(result.copyright?.text || "© mnhut - NFToken Pro")}</p><textarea class="result-text" readonly>${escapeHtml(result.cookie || "")}</textarea>${result.downloadUrl ? `<a class="button wide" href="${escapeHtml(result.downloadUrl)}">Tải Cookie bảo mật</a>` : ""}<button class="button secondary wide" data-copy-cookie>Sao chép Cookie</button>`, {onOpen(resultRoot) { resultRoot.querySelector("[data-copy-cookie]").onclick = () => copyText(result.cookie || ""); }}); }
-      catch (error) { toast(error.message, "error"); done(); }
+      const requestId = globalThis.crypto?.randomUUID?.() || `free-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      try { const result = await api.freeCookie(requestId); syncQuota(result.quota); state.bootstrap.checkin = result.checkin || state.bootstrap.checkin; close(); modal(`<div class="confirm-icon">✓</div><h2>Cookie của bạn</h2><p class="privacy-banner">${escapeHtml(result.copyright?.text || "© mnhut - NFToken Pro")}</p><textarea class="result-text" readonly>${escapeHtml(result.cookie || "")}</textarea>${result.warrantyUntil ? `<p>Hạn bảo hành: ${escapeHtml(result.warrantyUntil)}</p>` : ""}${result.downloadUrl ? `<a class="button wide" href="${escapeHtml(result.downloadUrl)}">Tải Cookie bảo mật</a>` : ""}<button class="button secondary wide" data-copy-cookie>Sao chép Cookie</button>`, {onOpen(resultRoot) { resultRoot.querySelector("[data-copy-cookie]").onclick = () => copyText(result.cookie || ""); }}); }
+      catch (error) { toast(error.message, "error"); }
+      finally { done(); }
     };
   }});
 }
@@ -315,14 +331,35 @@ export async function openDeposit() {
   } catch (error) { toast(error.message, "error"); }
 }
 
-export function openSupport() {
-  modal(`<div class="confirm-icon">🛟</div><h2>Báo lỗi & hỗ trợ</h2><label class="field">Mô tả vấn đề<textarea id="support-message" maxlength="1500" placeholder="Hãy mô tả chi tiết lỗi bạn gặp..."></textarea></label><button class="button wide" data-send-support>Gửi đến Admin</button>`, {onOpen(root, close) {
+export async function openSupport() {
+  let history = {items: []};
+  try { history = await api.supportHistory(); } catch {}
+  const orderOptions = (state.orders || []).map((item) => `<option value="${item.id}">#${item.id} · ${escapeHtml(item.plan_name)}</option>`).join("");
+  modal(`<div class="confirm-icon">🛟</div><h2>Báo lỗi & hỗ trợ</h2><label class="field">Nhóm vấn đề<select id="support-category"><option value="general">Chung</option><option value="order">Đơn hàng</option><option value="payment">Thanh toán</option><option value="nftoken">NFToken</option><option value="cookie">Cookie</option><option value="tv">TV login</option></select></label>${orderOptions ? `<label class="field">Đơn liên quan<select id="support-order"><option value="">Không chọn</option>${orderOptions}</select></label>` : ""}<label class="field">Mô tả vấn đề<textarea id="support-message" maxlength="1500" placeholder="Hãy mô tả chi tiết lỗi bạn gặp..."></textarea></label><button class="button wide" data-send-support>Gửi đến Admin</button>${history.items.length ? `<div class="support-history"><h3>Yêu cầu gần đây</h3>${history.items.slice(0,5).map((item) => `<article><b>#${item.id} · ${escapeHtml(item.category)}</b><small>${escapeHtml(item.status)}</small><p>${escapeHtml(item.message)}</p>${item.admin_reply ? `<em>${escapeHtml(item.admin_reply)}</em>` : ""}</article>`).join("")}</div>` : ""}`, {onOpen(root, close) {
     root.querySelector("[data-send-support]").onclick = async (event) => {
       const done = busyButton(event.currentTarget);
-      try { const result = await api.support(root.querySelector("#support-message").value); close(); toast(`Đã gửi yêu cầu #${result.ticketId}`); }
+      try { const result = await api.support(root.querySelector("#support-message").value, root.querySelector("#support-category").value, Number(root.querySelector("#support-order")?.value || 0) || null); close(); toast(`Đã gửi yêu cầu #${result.ticketId}`); }
       catch (error) { toast(error.message, "error"); done(); }
     };
   }});
+}
+
+export async function openDeliveries() {
+  try {
+    const result = await api.deliveries();
+    modal(`<div class="eyebrow">GIAO HÀNG AN TOÀN</div><h2>Lịch sử giao hàng</h2>${result.items.length ? result.items.map((item) => `<article class="delivery-card"><header><b>#${item.id} · ${escapeHtml(item.kind)}</b><em>${escapeHtml(item.status)}</em></header><small>${escapeHtml(item.delivered_at)}</small>${item.warranty_until ? `<p>Bảo hành đến ${escapeHtml(item.warranty_until)}</p>` : ""}${item.warranty_status ? `<p>${escapeHtml(item.resolution || item.warranty_status)}</p>` : ""}${item.warrantyAvailable ? `<button class="button secondary wide" data-warranty="${item.id}">Yêu cầu bảo hành</button>` : ""}</article>`).join("") : emptyState("Chưa có lần giao hàng", "Kết quả NFToken, Cookie và TV login sẽ được lưu tại đây.")}`, {onOpen(root, close) { root.querySelectorAll("[data-warranty]").forEach((button) => button.onclick = () => { close(); openWarranty(Number(button.dataset.warranty)); }); }});
+  } catch (error) { toast(error.message, "error"); }
+}
+
+function openWarranty(deliveryId) {
+  modal(`<div class="confirm-icon">♢</div><h2>Yêu cầu bảo hành</h2><label class="field">Mô tả lỗi<textarea id="warranty-reason" minlength="5" maxlength="500" placeholder="Mô tả tình trạng hiện tại..."></textarea></label><button class="button wide" data-submit-warranty>Kiểm tra tự động</button>`, {onOpen(root, close) { root.querySelector("[data-submit-warranty]").onclick = async (event) => { const done = busyButton(event.currentTarget, "Đang kiểm tra..."); try { const key = globalThis.crypto?.randomUUID?.() || `warranty-${Date.now()}`; const result = await api.warranty(deliveryId, root.querySelector("#warranty-reason").value, key); close(); toast(result.message || "Đã tiếp nhận bảo hành"); } catch (error) { toast(error.message, "error"); } finally { done(); } }; }});
+}
+
+export async function openDevices() {
+  try {
+    const result = await api.devices();
+    modal(`<div class="eyebrow">BẢO MẬT TÀI KHOẢN</div><h2>Thiết bị đăng nhập</h2><p>Tối đa ${result.limit} thiết bị.</p>${result.items.map((item) => `<article class="device-card"><div><b>${escapeHtml(item.label)}</b><small>${escapeHtml(item.platform || "Web")} · ${escapeHtml(item.lastSeenAt)}</small></div>${item.current ? "<em>Thiết bị này</em>" : item.revoked ? "<em>Đã thu hồi</em>" : `<button data-revoke-device="${item.id}">Thu hồi</button>`}</article>`).join("")}`, {onOpen(root, close) { root.querySelectorAll("[data-revoke-device]").forEach((button) => button.onclick = async () => { try { await api.revokeDevice(button.dataset.revokeDevice); close(); openDevices(); } catch (error) { toast(error.message, "error"); } }); }});
+  } catch (error) { toast(error.message, "error"); }
 }
 
 export function openHelp() {

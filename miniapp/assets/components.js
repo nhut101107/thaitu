@@ -1,5 +1,5 @@
 import {state} from "./state.js";
-import {isEnglish, translateDom, translateText} from "./i18n.js?v=2";
+import {isEnglish, translateDom, translateText} from "./i18n.js?v=3";
 
 const moneyVi = new Intl.NumberFormat("vi-VN");
 const moneyEn = new Intl.NumberFormat("en-US");

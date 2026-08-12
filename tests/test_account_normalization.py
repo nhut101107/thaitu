@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import re
 import unittest
 
 import code_goc
@@ -200,7 +201,8 @@ class AccountNormalizationTest(unittest.TestCase):
 
     def test_bot_menu_exposes_only_shop_mmo_mini_app(self):
         source = Path(code_goc.__file__).read_text(encoding="utf-8")
-        self.assertNotIn('CommandHandler("app"', source)
+        registered_commands = re.findall(r'application\.add_handler\(CommandHandler\("([^"]+)"', source)
+        self.assertEqual(registered_commands, ["start"])
         self.assertNotIn("/app", source)
         self.assertIn("MenuButtonWebApp", source)
         self.assertIn("Shop MMO", source)

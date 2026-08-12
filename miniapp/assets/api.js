@@ -4,6 +4,25 @@ function storedPwaSession() {
   try { return localStorage.getItem("shop_mmo_pwa_session") || ""; } catch { return ""; }
 }
 
+function storedDeviceId() {
+  try {
+    let value = localStorage.getItem("shop_mmo_device_id") || "";
+    if (!value) {
+      value = globalThis.crypto?.randomUUID?.() || `device-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      localStorage.setItem("shop_mmo_device_id", value);
+    }
+    return value;
+  } catch { return ""; }
+}
+
+function deviceHeaders() {
+  return {
+    "X-Device-Id": storedDeviceId(),
+    "X-Device-Label": `${navigator.platform || "Web"} · ${window.Telegram?.WebApp ? "Telegram" : "PWA"}`.slice(0, 80),
+    "X-Device-Platform": (navigator.platform || "Web").slice(0, 40),
+  };
+}
+
 export class ApiError extends Error {
   constructor(message, status, payload = {}) {
     super(message);
@@ -34,6 +53,7 @@ async function request(path, options = {}) {
         ...(isForm ? {} : {"Content-Type": "application/json"}),
         "X-Telegram-Init-Data": tg?.initData || "",
         "X-PWA-Session": storedPwaSession(),
+        ...deviceHeaders(),
         ...(options.headers || {}),
       },
     });
@@ -74,17 +94,23 @@ export const api = {
   order: (id) => request(`/api/orders/${id}`),
   transactions: () => request("/api/transactions"),
   toolsStatus: () => request("/api/tools/status"),
-  freeCookie: () => request("/api/tools/free-cookie", {method: "POST", body: "{}"}),
+  freeCookie: (requestId = "") => request("/api/tools/free-cookie", {method: "POST", body: JSON.stringify({requestId})}),
+  deliveries: () => request("/api/deliveries"),
+  warranty: (deliveryId, reason, idempotencyKey) => request("/api/warranty", {method: "POST", body: JSON.stringify({deliveryId, reason, idempotencyKey})}),
+  devices: () => request("/api/devices"),
+  revokeDevice: (id) => request(`/api/devices/${id}`, {method: "DELETE", body: "{}"}),
   referral: () => request("/api/referral"),
   checkin: () => request("/api/checkin", {method: "POST", body: "{}"}),
   checkinHistory: () => request("/api/checkin/history"),
-  nftoken: (mode, quantity = 1, requestId = "") => request("/api/tools/nftoken", {method: "POST", body: JSON.stringify({mode, quantity, requestId})}),
+  nftoken: (mode, quantity = 1, requestId = "", background = true) => request("/api/tools/nftoken", {method: "POST", body: JSON.stringify({mode, quantity, requestId, background})}),
   nftokenJob: (requestId) => request(`/api/tools/nftoken/job/${encodeURIComponent(requestId)}`),
+  cancelNftokenJob: (requestId) => request(`/api/tools/nftoken/job/${encodeURIComponent(requestId)}/cancel`, {method: "POST", body: "{}"}),
   tvLogin: (code) => request("/api/tools/tv-login", {method: "POST", body: JSON.stringify({code}), timeoutMs: 90000}),
   giftcode: (code) => request("/api/giftcode", {method: "POST", body: JSON.stringify({code})}),
   deposit: (amount) => request("/api/deposits", {method: "POST", body: JSON.stringify({amount})}),
   submitDeposit: (id) => request(`/api/deposits/${id}/submit`, {method: "POST", body: "{}"}),
-  support: (message) => request("/api/support", {method: "POST", body: JSON.stringify({message})}),
+  support: (message, category = "general", orderId = null) => request("/api/support", {method: "POST", body: JSON.stringify({message, category, orderId})}),
+  supportHistory: () => request("/api/support"),
   referralLeaderboard: (period = "WEEK", limit = 10) => request(`/api/referral/leaderboard?period=${period}&limit=${limit}`),
   flashSales: () => request("/api/flash-sales"),
   missions: () => request("/api/missions"),
@@ -119,6 +145,11 @@ export const api = {
   adminAddInventory: (kind, data) => request(`/api/admin/inventory/${kind}`, {method: "POST", body: JSON.stringify({data})}),
   adminUploadInventory: (kind, files) => { const body = new FormData(); const list = Array.isArray(files) ? files : [files]; list.forEach((file) => body.append("files", file, file.webkitRelativePath || file.name)); return request(`/api/admin/inventory/${kind}/upload`, {method: "POST", body}); },
   adminCleanupInventory: (kind) => request(`/api/admin/inventory/${kind}/cleanup`, {method: "POST", body: "{}"}),
+  adminScanInventory: (kind, limit = 100) => request(`/api/admin/inventory/${kind}/scan`, {method: "POST", body: JSON.stringify({limit})}),
+  adminReleaseQuarantine: (kind) => request(`/api/admin/inventory/${kind}/release-quarantine`, {method: "POST", body: "{}"}),
+  adminResolveWarranty: (id, value) => request(`/api/admin/warranties/${id}`, {method: "PUT", body: JSON.stringify(value)}),
+  adminReconcilePayment: (value) => request("/api/admin/payments/reconcile", {method: "POST", body: JSON.stringify(value)}),
+  adminOperations: (refresh = false) => request(`/api/admin/operations${refresh ? "?refresh=1" : ""}`),
   adminUpdateOrder: (id, value) => request(`/api/admin/orders/${id}`, {method: "PUT", body: JSON.stringify(value)}),
   adminFlashSales: () => request("/api/admin/flash-sales"),
   adminCreateFlashSale: (value) => request("/api/admin/flash-sales", {method: "POST", body: JSON.stringify(value)}),
@@ -126,7 +157,7 @@ export const api = {
   adminReferralLeaderboards: () => request("/api/admin/referral-leaderboards"),
   adminUpdateReferralLeaderboard: (period, value) => request(`/api/admin/referral-leaderboards/${period}`, {method: "PUT", body: JSON.stringify(value)}),
   adminReports: (params = {}) => request(`/api/admin/reports?${new URLSearchParams(params)}`),
-  adminReportsCsv: async () => { const response = await fetch("/api/admin/reports?format=csv", {headers: {"X-Telegram-Init-Data": tg?.initData || ""}}); if (!response.ok) throw new ApiError("Không thể tải báo cáo", response.status); return response.blob(); },
+  adminReportsCsv: async () => { const response = await fetch("/api/admin/reports?format=csv", {headers: {"X-Telegram-Init-Data": tg?.initData || "", "X-PWA-Session": storedPwaSession(), ...deviceHeaders()}}); if (!response.ok) throw new ApiError("Không thể tải báo cáo", response.status); return response.blob(); },
   adminMissions: () => request("/api/admin/missions"),
   adminCreateMission: (value) => request("/api/admin/missions", {method: "POST", body: JSON.stringify(value)}),
   adminUpdateMission: (id, value) => request(`/api/admin/missions/${id}`, {method: "PUT", body: JSON.stringify(value)}),

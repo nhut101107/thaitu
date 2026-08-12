@@ -5,6 +5,7 @@ import io
 import json
 import os
 import random
+import re
 import shutil
 import sqlite3
 import sys
@@ -70,7 +71,14 @@ CHECKOUT_ATTEMPTS = {}
 CHECKOUT_LOCK = threading.Lock()
 TOOL_ATTEMPTS = {}
 TOOL_LOCK = threading.Lock()
+DEVICE_LIMIT = 5
+LOW_STOCK_ALERT_LOCK = threading.Lock()
+LOW_STOCK_ALERTS = {}
+MAINTENANCE_LOCK = threading.Lock()
+LAST_MAINTENANCE_RUN = 0.0
+PROCESS_STARTED_AT = time.time()
 COOKIE_CHECK_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="nftoken-check")
+NFTOKEN_JOB_EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="nftoken-job")
 try:
     COOKIE_CHECK_TIMEOUT = max(1, min(int(os.getenv("MINIAPP_COOKIE_CHECK_TIMEOUT", "30")), 30))
 except (TypeError, ValueError):
@@ -101,7 +109,8 @@ def now_iso():
 
 
 def migration_backup_path():
-    return f"{DATABASE_PATH}.migration.bak"
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return f"{DATABASE_PATH}.migration.{stamp}.{uuid.uuid4().hex[:8]}.bak"
 
 
 def backup_database_for_migration():
@@ -118,8 +127,7 @@ def backup_database_for_migration():
     return target
 
 
-def restore_database_backup():
-    target = migration_backup_path()
+def restore_database_backup(target):
     if not os.path.exists(target):
         return False
     source = sqlite3.connect(target, timeout=30)
@@ -192,7 +200,62 @@ def _bg_upload_worker(job_id, table, entries, admin_id):
     except Exception as exc:
         with UPLOAD_JOBS_LOCK:
             UPLOAD_JOBS[job_id]["status"] = "error"
-            UPLOAD_JOBS[job_id]["result"] = {"ok": False, "error": str(exc)}
+            UPLOAD_JOBS[job_id]["result"] = {"ok": False, "error": "Không thể xử lý lô Cookie"}
+
+
+def _bg_inventory_scan_worker(job_id, source, rows, admin_id):
+    table = COOKIE_TABLES[source]
+    live = dead = quarantined = checked = 0
+    try:
+        def check(row):
+            result = run_cookie_check(row["data"], timeout=COOKIE_CHECK_TIMEOUT, request_id=f"inventory-{job_id}")
+            return row["id"], result
+
+        with ThreadPoolExecutor(max_workers=min(6, max(1, len(rows)))) as executor:
+            futures = [executor.submit(check, row) for row in rows]
+            for future in as_completed(futures):
+                cookie_id, (success, token, error, account, _netscape) = future.result()
+                reason = nftoken_failure_reason(error)
+                connection = sqlite3.connect(DATABASE_PATH, timeout=30)
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA busy_timeout=30000")
+                if success and token and account.get("membership_status") == "CURRENT_MEMBER":
+                    inventory_outcome(connection, source, cookie_id, True)
+                    live += 1
+                elif reason in {"cookie_expired", "cookie_invalid"}:
+                    inventory_outcome(connection, source, cookie_id, False, reason)
+                    dead += 1
+                else:
+                    inventory_outcome(connection, source, cookie_id, False, reason)
+                    quarantined += 1
+                connection.commit()
+                connection.close()
+                checked += 1
+                with UPLOAD_JOBS_LOCK:
+                    UPLOAD_JOBS[job_id]["progress"] = {
+                        "checked": checked, "total": len(rows), "live": live,
+                        "dead": dead, "quarantined": quarantined,
+                        "percent": round(checked / max(1, len(rows)) * 100),
+                    }
+        connection = sqlite3.connect(DATABASE_PATH, timeout=30)
+        connection.execute(
+            "INSERT INTO miniapp_admin_audit(admin_id,action,target,details,created_at) VALUES(?,?,?,?,?)",
+            (admin_id, "inventory.scan", source,
+             f"checked={checked},live={live},dead={dead},quarantined={quarantined}", now_iso()),
+        )
+        connection.commit()
+        connection.close()
+        with UPLOAD_JOBS_LOCK:
+            UPLOAD_JOBS[job_id]["status"] = "done"
+            UPLOAD_JOBS[job_id]["result"] = {
+                "ok": True, "checked": checked, "live": live,
+                "dead": dead, "quarantined": quarantined,
+            }
+    except Exception as exc:
+        app.logger.error("Inventory scan failed job_id=%s type=%s", job_id, type(exc).__name__)
+        with UPLOAD_JOBS_LOCK:
+            UPLOAD_JOBS[job_id]["status"] = "error"
+            UPLOAD_JOBS[job_id]["result"] = {"ok": False, "error": "Không thể hoàn tất kiểm tra kho"}
 
 app = Flask(__name__, static_folder=None)
 app.config["MAX_CONTENT_LENGTH"] = INVENTORY_MAX_UPLOAD_MB * 1024 * 1024
@@ -520,7 +583,8 @@ def migrate():
         INSERT OR IGNORE INTO miniapp_settings(key,value) VALUES
             ('feature_referral','1'),('free_cookie_daily_limit','2'),
             ('trial_nftoken_enabled','1'),('trial_nftoken_daily_limit','2'),
-            ('trial_cookie_enabled','1'),('trial_cookie_daily_limit','2');
+            ('trial_cookie_enabled','1'),('trial_cookie_daily_limit','2'),
+            ('delivery_warranty_days','1'),('low_stock_threshold','5');
         INSERT OR IGNORE INTO customer_rank_settings(rank,referral_threshold,spend_threshold,benefits) VALUES
             ('Bronze',0,0,'Hạng mặc định'),('Silver',5,100000,'Ưu đãi Silver'),
             ('Platinum',20,500000,'Ưu đãi Platinum'),('Diamond',50,2000000,'Ưu đãi Diamond');
@@ -652,8 +716,120 @@ def migrate():
             language TEXT NOT NULL DEFAULT 'vi',
             updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS delivery_events(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            inventory_source TEXT NOT NULL DEFAULT '',
+            inventory_id INTEGER,
+            request_id TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'delivered',
+            account_json TEXT NOT NULL DEFAULT '{}',
+            warranty_until TEXT,
+            delivered_at TEXT NOT NULL,
+            UNIQUE(user_id,kind,request_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_delivery_events_user
+            ON delivery_events(user_id,id DESC);
+        CREATE INDEX IF NOT EXISTS idx_delivery_inventory_user
+            ON delivery_events(user_id,inventory_source,inventory_id,status);
+        CREATE TABLE IF NOT EXISTS warranty_requests(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            delivery_id INTEGER NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending',
+            resolution TEXT NOT NULL DEFAULT '',
+            idempotency_key TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(user_id,idempotency_key),
+            UNIQUE(delivery_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_warranty_status
+            ON warranty_requests(status,id DESC);
+        CREATE TABLE IF NOT EXISTS user_devices(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            device_hash TEXT NOT NULL,
+            label TEXT NOT NULL DEFAULT '',
+            platform TEXT NOT NULL DEFAULT '',
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            revoked INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(user_id,device_hash)
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_devices_active
+            ON user_devices(user_id,revoked,last_seen_at DESC);
+        CREATE TABLE IF NOT EXISTS risk_events(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            device_hash TEXT NOT NULL DEFAULT '',
+            code TEXT NOT NULL,
+            score INTEGER NOT NULL DEFAULT 0,
+            request_id TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
+            UNIQUE(user_id,code,request_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_risk_events_user
+            ON risk_events(user_id,id DESC);
+        CREATE TABLE IF NOT EXISTS payment_events(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            transaction_id INTEGER NOT NULL,
+            provider TEXT NOT NULL DEFAULT 'manual',
+            provider_reference TEXT NOT NULL,
+            amount INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            payload_hash TEXT NOT NULL DEFAULT '',
+            UNIQUE(provider,provider_reference)
+        );
+        CREATE TABLE IF NOT EXISTS service_events(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            service TEXT NOT NULL,
+            status TEXT NOT NULL,
+            details TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS automation_runs(
+            run_key TEXT PRIMARY KEY,
+            completed_at TEXT NOT NULL
+        );
         """
     )
+    for table in ("premium_cookies", "free_cookies"):
+        inventory_columns = column_names(connection, table)
+        for name, definition in {
+            "health_status": "TEXT NOT NULL DEFAULT 'unknown'",
+            "failure_count": "INTEGER NOT NULL DEFAULT 0",
+            "last_checked_at": "TEXT",
+            "last_error_code": "TEXT NOT NULL DEFAULT ''",
+            "quarantine_until": "TEXT",
+            "delivery_count": "INTEGER NOT NULL DEFAULT 0",
+        }.items():
+            if name not in inventory_columns:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+        connection.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_{table}_availability "
+            f"ON {table}(is_used,health_status,quarantine_until,id)"
+        )
+    support_columns = column_names(connection, "miniapp_support")
+    for name, definition in {
+        "order_id": "INTEGER",
+        "category": "TEXT NOT NULL DEFAULT 'general'",
+        "priority": "TEXT NOT NULL DEFAULT 'normal'",
+        "admin_reply": "TEXT NOT NULL DEFAULT ''",
+        "updated_at": "TEXT",
+    }.items():
+        if name not in support_columns:
+            connection.execute(f"ALTER TABLE miniapp_support ADD COLUMN {name} {definition}")
+    transaction_columns = column_names(connection, "transactions")
+    for name, definition in {
+        "payment_deadline": "TEXT",
+        "provider_reference": "TEXT NOT NULL DEFAULT ''",
+    }.items():
+        if name not in transaction_columns:
+            connection.execute(f"ALTER TABLE transactions ADD COLUMN {name} {definition}")
     provider_columns = column_names(connection, "product_providers")
     for name, definition in {
         "priority": "INTEGER NOT NULL DEFAULT 100",
@@ -690,13 +866,12 @@ def ensure_migrated():
     with MIGRATION_LOCK:
         if DATABASE_PATH not in MIGRATED_PATHS:
             had_database = os.path.exists(DATABASE_PATH)
-            if had_database:
-                backup_database_for_migration()
+            backup_path = backup_database_for_migration() if had_database else None
             try:
                 migrate()
             except Exception:
-                if had_database:
-                    restore_database_backup()
+                if backup_path:
+                    restore_database_backup(backup_path)
                 raise
             MIGRATED_PATHS.add(DATABASE_PATH)
 
@@ -771,6 +946,12 @@ def authenticated(handler):
         connection = db()
         user_id = ensure_user(connection, g.telegram_user)
         register_referral(connection, user_id, g.telegram_user.get("_start_param"))
+        device = register_device(connection, user_id)
+        if not device["ok"]:
+            connection.commit()
+            message = "Thiết bị này đã bị thu hồi" if device["reason_code"] == "device_revoked" else "Tài khoản đã đạt giới hạn thiết bị"
+            return jsonify({"ok": False, "error": message, "reason_code": device["reason_code"]}), 403
+        g.device_hash = device.get("deviceHash", "")
         banned = connection.execute(
             "SELECT is_banned FROM users WHERE user_id=?", (user_id,)
         ).fetchone()
@@ -907,6 +1088,196 @@ def tool_rate_limited(user_id, limit=6, window=30):
         return False
 
 
+def normalized_device_header():
+    raw = request.headers.get("X-Device-Id", "").strip()
+    if not raw or len(raw) > 200 or not re.fullmatch(r"[A-Za-z0-9._:-]+", raw):
+        return ""
+    return hashlib.sha256(f"{DOWNLOAD_SECRET}:device:{raw}".encode()).hexdigest()
+
+
+def register_device(connection, user_id):
+    """Register an opaque device identifier without storing browser fingerprints."""
+    device_hash = normalized_device_header()
+    if not device_hash:
+        return {"ok": True, "deviceHash": ""}
+    row = connection.execute(
+        "SELECT id,revoked FROM user_devices WHERE user_id=? AND device_hash=?",
+        (user_id, device_hash),
+    ).fetchone()
+    now = now_iso()
+    label = str(request.headers.get("X-Device-Label", "Thiết bị") or "Thiết bị")[:80]
+    platform = str(request.headers.get("X-Device-Platform", "") or "")[:40]
+    if row:
+        if row["revoked"]:
+            return {"ok": False, "reason_code": "device_revoked"}
+        connection.execute(
+            "UPDATE user_devices SET label=?,platform=?,last_seen_at=? WHERE id=?",
+            (label, platform, now, row["id"]),
+        )
+        return {"ok": True, "deviceHash": device_hash}
+    active = connection.execute(
+        "SELECT COUNT(*) FROM user_devices WHERE user_id=? AND revoked=0", (user_id,)
+    ).fetchone()[0]
+    if int(active) >= DEVICE_LIMIT:
+        record_risk_event(connection, user_id, "device_limit", 25, device_hash, "device-limit")
+        return {"ok": False, "reason_code": "device_limit"}
+    connection.execute(
+        """INSERT INTO user_devices(user_id,device_hash,label,platform,first_seen_at,last_seen_at)
+           VALUES(?,?,?,?,?,?)""",
+        (user_id, device_hash, label, platform, now, now),
+    )
+    return {"ok": True, "deviceHash": device_hash}
+
+
+def record_risk_event(connection, user_id, code, score, device_hash="", request_id=""):
+    safe_code = re.sub(r"[^a-z0-9_.-]", "", str(code).lower())[:50] or "unknown"
+    safe_request = re.sub(r"[^A-Za-z0-9_.-]", "", str(request_id))[:100]
+    connection.execute(
+        """INSERT OR IGNORE INTO risk_events(user_id,device_hash,code,score,request_id,created_at)
+           VALUES(?,?,?,?,?,?)""",
+        (int(user_id), str(device_hash)[:64], safe_code, max(0, min(int(score), 100)), safe_request, now_iso()),
+    )
+
+
+def user_risk_payload(connection, user_id):
+    since = (datetime.now(LOCAL_TZ) - timedelta(days=30)).replace(tzinfo=None).isoformat(timespec="seconds")
+    row = connection.execute(
+        "SELECT COALESCE(SUM(score),0),COUNT(*) FROM risk_events WHERE user_id=? AND created_at>=?",
+        (int(user_id), since),
+    ).fetchone()
+    score = min(100, int(row[0] or 0))
+    return {"score": score, "level": "high" if score >= 60 else "medium" if score >= 25 else "low", "events": int(row[1] or 0)}
+
+
+def record_delivery(connection, user_id, kind, source="", inventory_id=None, request_id="", account=None):
+    request_key = str(request_id or uuid.uuid4().hex)[:100]
+    days = bounded_setting_int(connection, "delivery_warranty_days", 1, 0, 365)
+    warranty_until = None
+    if days:
+        warranty_until = (datetime.now(LOCAL_TZ) + timedelta(days=days)).replace(tzinfo=None).isoformat(timespec="seconds")
+    inserted = connection.execute(
+        """INSERT OR IGNORE INTO delivery_events(
+               user_id,kind,inventory_source,inventory_id,request_id,status,account_json,
+               warranty_until,delivered_at
+           ) VALUES(?,?,?,?,?,'delivered',?,?,?)""",
+        (int(user_id), str(kind)[:30], str(source)[:20], inventory_id, request_key,
+         json.dumps(public_account(account or {}), ensure_ascii=False, separators=(",", ":")),
+         warranty_until, now_iso()),
+    )
+    if inserted.rowcount and source in COOKIE_TABLES and inventory_id is not None:
+        connection.execute(
+            f"UPDATE {COOKIE_TABLES[source]} SET delivery_count=delivery_count+1 WHERE id=?",
+            (int(inventory_id),),
+        )
+    return connection.execute(
+        "SELECT id,warranty_until FROM delivery_events WHERE user_id=? AND kind=? AND request_id=?",
+        (int(user_id), str(kind)[:30], request_key),
+    ).fetchone()
+
+
+def inventory_outcome(connection, source, cookie_id, success=False, reason_code=""):
+    table = COOKIE_TABLES.get(source)
+    if not table or cookie_id is None:
+        return
+    reason = re.sub(r"[^a-z0-9_.-]", "", str(reason_code).lower())[:50]
+    if success:
+        connection.execute(
+            f"""UPDATE {table} SET health_status='live',failure_count=0,last_error_code='',
+                   quarantine_until=NULL,last_checked_at=? WHERE id=?""",
+            (now_iso(), int(cookie_id)),
+        )
+        return
+    if reason in {"cookie_expired", "cookie_invalid", "dead", "cookie_format"}:
+        connection.execute(f"DELETE FROM {table} WHERE id=?", (int(cookie_id),))
+        return
+    quarantine_until = (datetime.now(LOCAL_TZ) + timedelta(minutes=15)).replace(tzinfo=None).isoformat(timespec="seconds")
+    connection.execute(
+        f"""UPDATE {table} SET is_used=0,health_status='quarantined',
+               failure_count=failure_count+1,last_error_code=?,last_checked_at=?,quarantine_until=?
+           WHERE id=?""",
+        (reason or "temporary_error", now_iso(), quarantine_until, int(cookie_id)),
+    )
+
+
+def available_stock_count(connection, source):
+    table = COOKIE_TABLES[source]
+    return int(connection.execute(
+        f"""SELECT COUNT(*) FROM {table} WHERE is_used=0 AND health_status!='dead'
+            AND (quarantine_until IS NULL OR quarantine_until<=?)""",
+        (now_iso(),),
+    ).fetchone()[0])
+
+
+def maybe_alert_low_stock(connection):
+    if app.config.get("TESTING"):
+        return
+    threshold = bounded_setting_int(connection, "low_stock_threshold", 5, 0, 100000)
+    if threshold <= 0:
+        return
+    now = time.monotonic()
+    for source, table in COOKIE_TABLES.items():
+        count = connection.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE is_used=0 AND health_status!='dead' "
+            "AND (quarantine_until IS NULL OR quarantine_until<=?)",
+            (now_iso(),),
+        ).fetchone()[0]
+        if count > threshold:
+            continue
+        with LOW_STOCK_ALERT_LOCK:
+            if now - LOW_STOCK_ALERTS.get(source, 0) < 3600:
+                continue
+            LOW_STOCK_ALERTS[source] = now
+        telegram_notify(f"⚠️ <b>Kho {html.escape(source)}</b> chỉ còn {int(count)} mục khả dụng.")
+
+
+def run_maintenance_tasks(connection, force=False):
+    global LAST_MAINTENANCE_RUN
+    now_monotonic = time.monotonic()
+    with MAINTENANCE_LOCK:
+        if not force and now_monotonic - LAST_MAINTENANCE_RUN < 300:
+            return
+        LAST_MAINTENANCE_RUN = now_monotonic
+    connection.execute(
+        """UPDATE transactions SET status='EXPIRED',review_note='Đã hết thời gian thanh toán'
+           WHERE status='AWAITING_PAYMENT' AND payment_deadline IS NOT NULL AND payment_deadline<?""",
+        (now_iso(),),
+    )
+    day_key = f"daily:{local_today()}"
+    inserted = connection.execute(
+        "INSERT OR IGNORE INTO automation_runs(run_key,completed_at) VALUES(?,?)",
+        (day_key, now_iso()),
+    )
+    if inserted.rowcount:
+        tomorrow = (datetime.now(LOCAL_TZ) + timedelta(days=1)).replace(tzinfo=None).isoformat(timespec="seconds")
+        expiring = connection.execute(
+            """SELECT id,user_id,plan_name,warranty_until FROM purchase_history
+               WHERE warranty_until IS NOT NULL AND warranty_until>=? AND warranty_until<=?""",
+            (now_iso(), tomorrow),
+        ).fetchall()
+        for row in expiring:
+            notify(connection, row["user_id"], "warranty_expiring", "Bảo hành sắp hết hạn", f"Đơn #{row['id']} · {row['plan_name']} sắp hết thời hạn bảo hành")
+    connection.commit()
+    maybe_alert_low_stock(connection)
+    if not app.config.get("TESTING") and os.path.exists(DATABASE_PATH):
+        backup_dir = os.path.join(BASE_DIR, "backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        backup_path = os.path.join(backup_dir, f"auto-{local_today()}.db")
+        if not os.path.exists(backup_path):
+            source = sqlite3.connect(DATABASE_PATH, timeout=30)
+            target = sqlite3.connect(backup_path, timeout=30)
+            try:
+                source.backup(target)
+            finally:
+                target.close()
+                source.close()
+            connection.execute(
+                "INSERT INTO service_events(service,status,details,created_at) VALUES('backup','ok','daily backup created',?)",
+                (now_iso(),),
+            )
+            connection.commit()
+            connection.commit()
+
+
 def telegram_send(chat_id, text, reply_markup=None):
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token or not chat_id:
@@ -923,8 +1294,8 @@ def telegram_send(chat_id, text, reply_markup=None):
         )
         with urlopen(telegram_request, timeout=10) as response:
             return 200 <= response.status < 300
-    except (OSError, URLError):
-        app.logger.warning("Unable to notify Telegram admin", exc_info=True)
+    except (OSError, URLError) as error:
+        app.logger.warning("Unable to notify Telegram admin type=%s", type(error).__name__)
         return False
 
 
@@ -951,13 +1322,28 @@ def nftoken_cookie_order(allow_free=False):
     return ("premium", "free")
 
 
-def reserve_cookie_row(connection, sources):
+def reserve_cookie_row(connection, sources, user_id=None):
     for source in sources:
         table = COOKIE_TABLES.get(source)
         if not table:
             continue
+        params = [now_iso()]
+        user_filter = ""
+        if user_id is not None:
+            user_filter = """AND NOT EXISTS(
+                SELECT 1 FROM delivery_events d
+                WHERE d.user_id=? AND d.inventory_source=? AND d.inventory_id={table}.id
+                  AND d.status IN ('delivered','warranty_approved')
+            )""".format(table=table)
+            params.extend([int(user_id), source])
         row = connection.execute(
-            f"SELECT id, data FROM {table} WHERE is_used=0 ORDER BY RANDOM() LIMIT 1"
+            f"""SELECT id,data FROM {table}
+                WHERE is_used=0 AND health_status!='dead'
+                  AND (quarantine_until IS NULL OR quarantine_until<=?)
+                  {user_filter}
+                ORDER BY CASE health_status WHEN 'live' THEN 0 ELSE 1 END,
+                         failure_count ASC,RANDOM() LIMIT 1""",
+            params,
         ).fetchone()
         if not row:
             continue
@@ -969,9 +1355,9 @@ def reserve_cookie_row(connection, sources):
     return None
 
 
-def reserve_cookie(connection):
+def reserve_cookie(connection, user_id=None):
     connection.execute("BEGIN IMMEDIATE")
-    reserved = reserve_cookie_row(connection, ("premium",))
+    reserved = reserve_cookie_row(connection, ("premium",), user_id=user_id)
     if not reserved:
         connection.rollback()
         raise ToolError("Kho Cookie Premium đang trống", 409)
@@ -979,9 +1365,9 @@ def reserve_cookie(connection):
     return reserved[0], reserved[1]
 
 
-def reserve_nftoken_cookie(connection, allow_free=False):
+def reserve_nftoken_cookie(connection, allow_free=False, user_id=None):
     connection.execute("BEGIN IMMEDIATE")
-    reserved = reserve_cookie_row(connection, nftoken_cookie_order(allow_free))
+    reserved = reserve_cookie_row(connection, nftoken_cookie_order(allow_free), user_id=user_id)
     if not reserved:
         connection.rollback()
         raise ToolError("Kho Cookie tạo NFToken đang trống", 409, "stock_empty")
@@ -992,7 +1378,6 @@ def reserve_nftoken_cookie(connection, allow_free=False):
 def reserve_nftoken_request(connection, user_id, mode):
     today = local_today()
     connection.execute("BEGIN IMMEDIATE")
-    ensure_user(connection, g.telegram_user)
     trial = trial_settings(connection)
     trial_kind = "cookie" if mode == "vip" else "nftoken"
     quota_source = None
@@ -1047,7 +1432,7 @@ def reserve_nftoken_request(connection, user_id, mode):
                 raise ToolError("Bạn đã hết lượt tạo NFToken", 409, "nftoken_quota_exhausted")
             quota_source = {"kind": "daily_nftoken", "date": today}
     allow_free = quota_source.get("kind") == "trial_nftoken"
-    reserved = reserve_cookie_row(connection, nftoken_cookie_order(allow_free))
+    reserved = reserve_cookie_row(connection, nftoken_cookie_order(allow_free), user_id=user_id)
     if not reserved:
         connection.rollback()
         raise ToolError("Kho Cookie tạo NFToken đang trống", 409, "stock_empty")
@@ -1500,6 +1885,26 @@ def provider_candidates(connection, item, primary_id):
     return [row for row in rows if not (row["id"] in seen or seen.add(row["id"]))]
 
 
+def record_provider_attempt(checkout_key, provider_id, external_product_id, status, latency_ms, error_code=""):
+    """Persist provider telemetry in its own short transaction, never around network I/O."""
+    audit_connection = sqlite3.connect(DATABASE_PATH, timeout=30)
+    try:
+        audit_connection.execute("PRAGMA busy_timeout=30000")
+        audit_connection.execute(
+            """INSERT INTO provider_attempts(
+                   checkout_key,provider_id,external_product_id,status,latency_ms,error_code,created_at
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (checkout_key, int(provider_id), str(external_product_id), status, int(latency_ms), str(error_code)[:50], now_iso()),
+        )
+        audit_connection.execute(
+            "UPDATE product_providers SET last_error_code=?,last_response_ms=?,last_checked_at=? WHERE id=?",
+            (str(error_code)[:50], int(latency_ms), now_iso(), int(provider_id)),
+        )
+        audit_connection.commit()
+    finally:
+        audit_connection.close()
+
+
 def create_provider_order_with_fallback(connection, item, user_id, checkout_key, quantity=1):
     primary_id = item.get("providerId")
     if not primary_id or not item.get("externalProductId"):
@@ -1516,15 +1921,13 @@ def create_provider_order_with_fallback(connection, item, user_id, checkout_key,
             if status in {"failed", "rejected", "error"}:
                 raise ProviderError("provider_rejected", "Nhà cung cấp từ chối yêu cầu")
             elapsed = int((time.perf_counter() - started) * 1000)
-            connection.execute("INSERT INTO provider_attempts(checkout_key,provider_id,external_product_id,status,latency_ms,created_at) VALUES(?,?,?,?,?,?)", (checkout_key, candidate["id"], item["externalProductId"], "success", elapsed, now_iso()))
-            connection.execute("UPDATE product_providers SET last_error_code='',last_response_ms=?,last_checked_at=? WHERE id=?", (elapsed, now_iso(), candidate["id"]))
+            record_provider_attempt(checkout_key, candidate["id"], item["externalProductId"], "success", elapsed)
             return candidate, result
         except ProviderError as error:
             elapsed = int((time.perf_counter() - started) * 1000)
             last_error = error
             code = getattr(error, "reason_code", "provider_error")
-            connection.execute("INSERT INTO provider_attempts(checkout_key,provider_id,external_product_id,status,latency_ms,error_code,created_at) VALUES(?,?,?,?,?,?,?)", (checkout_key, candidate["id"], item["externalProductId"], "failed", elapsed, code, now_iso()))
-            connection.execute("UPDATE product_providers SET last_error_code=?,last_response_ms=?,last_checked_at=? WHERE id=?", (code, elapsed, now_iso(), candidate["id"]))
+            record_provider_attempt(checkout_key, candidate["id"], item["externalProductId"], "failed", elapsed, code)
             if not retryable_provider_error(code):
                 raise
     raise last_error or ProviderError("provider_unavailable")
@@ -1633,12 +2036,22 @@ def service_worker():
 
 @app.get("/api/health")
 def health():
+    database_ok = True
+    try:
+        connection = db()
+        connection.execute("SELECT 1").fetchone()
+        run_maintenance_tasks(connection)
+    except Exception as error:
+        database_ok = False
+        app.logger.error("Health maintenance failed type=%s", type(error).__name__)
     return jsonify({
-        "ok": True,
+        "ok": database_ok,
         "service": "Shop MMO Mini App",
         "runtime_version": TV_LOGIN_RUNTIME_VERSION,
         "source_fingerprint": SOURCE_FINGERPRINT,
-    })
+        "database": "ok" if database_ok else "error",
+        "uptimeSeconds": max(0, int(time.time() - PROCESS_STARTED_AT)),
+    }), (200 if database_ok else 503)
 
 
 @app.get("/api/bootstrap")
@@ -1661,9 +2074,7 @@ def bootstrap():
         "SELECT COALESCE(SUM(quantity), 0) FROM miniapp_cart WHERE user_id=?",
         (user_id,),
     ).fetchone()[0]
-    stock = connection.execute(
-        "SELECT COUNT(*) FROM premium_cookies WHERE is_used=0"
-    ).fetchone()[0]
+    stock = available_stock_count(connection, "premium")
     quota = quota_payload(connection, user_id)
     ensure_referral_code(connection, user_id)
     connection.commit()
@@ -1847,22 +2258,71 @@ def checkout():
         return jsonify({"ok": False, "error": "Mã xác nhận không hợp lệ"}), 400
     user_id = int(g.telegram_user["id"])
     if checkout_rate_limited(user_id):
+        connection = db()
+        record_risk_event(connection, user_id, "checkout_rate_limit", 5, getattr(g, "device_hash", ""), str(int(time.time()) // 10))
+        connection.commit()
         return jsonify({"ok": False, "error": "Bạn thao tác quá nhanh, vui lòng thử lại"}), 429
     connection = db()
+    provider_orders = []
+
+    def refund_provider_results():
+        for provider_row, _item, _provider_key, result in provider_orders:
+            try:
+                external_id = result.get("order_id", result.get("id", ""))
+                if external_id:
+                    provider_for(provider_row).refund(external_id)
+            except Exception as error:
+                app.logger.warning("Provider refund failed type=%s", type(error).__name__)
+
     try:
-        connection.execute("BEGIN IMMEDIATE")
         existing = connection.execute(
             "SELECT order_ids, total FROM miniapp_checkouts WHERE user_id=? AND idempotency_key=?",
             (user_id, key),
         ).fetchone()
         if existing:
-            connection.rollback()
             return jsonify({"ok": True, "duplicate": True, "orderIds": json.loads(existing[0]), "total": existing[1]})
         cart = cart_payload(connection, user_id)
         if not cart["items"]:
-            connection.rollback()
             return jsonify({"ok": False, "error": "Giỏ hàng đang trống"}), 400
         promo = calculate_promo(connection, user_id, promo_code, cart["items"])
+        user = connection.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)).fetchone()
+        if not user:
+            return jsonify({"ok": False, "error": "Không tìm thấy tài khoản"}), 404
+        if user["balance"] < promo["final"]:
+            return jsonify({"ok": False, "error": "Số dư không đủ", "required": promo["final"], "balance": user["balance"]}), 409
+        snapshot = [
+            (int(item["id"]), int(item["quantity"]), int(item["price"]), int(item["lineTotal"]),
+             int(item.get("providerId") or 0), str(item.get("externalProductId") or ""))
+            for item in cart["items"]
+        ]
+        # No SQLite write transaction is active while external providers run.
+        for item in cart["items"]:
+            provider_id = item.get("providerId")
+            if not provider_id:
+                continue
+            for index in range(int(item["quantity"])):
+                provider_key = f"{user_id}:{key}:{item['id']}:{index}"
+                provider_row, result = create_provider_order_with_fallback(connection, item, user_id, provider_key, 1)
+                provider_orders.append((provider_row, item, provider_key, result))
+
+        connection.execute("BEGIN IMMEDIATE")
+        existing = connection.execute(
+            "SELECT order_ids,total FROM miniapp_checkouts WHERE user_id=? AND idempotency_key=?",
+            (user_id, key),
+        ).fetchone()
+        if existing:
+            connection.commit()
+            return jsonify({"ok": True, "duplicate": True, "orderIds": json.loads(existing[0]), "total": existing[1]})
+        locked_cart = cart_payload(connection, user_id)
+        locked_promo = calculate_promo(connection, user_id, promo_code, locked_cart["items"])
+        locked_snapshot = [
+            (int(item["id"]), int(item["quantity"]), int(item["price"]), int(item["lineTotal"]),
+             int(item.get("providerId") or 0), str(item.get("externalProductId") or ""))
+            for item in locked_cart["items"]
+        ]
+        if locked_snapshot != snapshot or locked_promo["final"] != promo["final"]:
+            raise ToolError("Giỏ hàng hoặc giá đã thay đổi, vui lòng xác nhận lại", 409, "cart_changed")
+        cart, promo = locked_cart, locked_promo
         flash_claims = []
         for item in cart["items"]:
             sale = active_flash_sale(connection, item["id"])
@@ -1873,26 +2333,11 @@ def checkout():
                     (quantity, sale["id"], quantity),
                 )
                 if updated_sale.rowcount != 1:
-                    raise ToolError("Flash Sale đã hết số lượng", 409)
+                    raise ToolError("Flash Sale đã hết số lượng", 409, "flash_sale_sold_out")
                 flash_claims.append((sale["id"], quantity))
-        provider_orders = []
-        for item in cart["items"]:
-            provider_id = item.get("providerId")
-            if not provider_id:
-                continue
-            for index in range(int(item["quantity"])):
-                provider_key = f"{user_id}:{key}:{item['id']}:{index}"
-                provider_row, result = create_provider_order_with_fallback(connection, item, user_id, provider_key, 1)
-                provider_orders.append((provider_row, item, provider_key, result))
-        user = connection.execute(
-            "SELECT balance FROM users WHERE user_id=?", (user_id,)
-        ).fetchone()
-        if not user:
-            connection.rollback()
-            return jsonify({"ok": False, "error": "Không tìm thấy tài khoản"}), 404
+        user = connection.execute("SELECT balance FROM users WHERE user_id=?", (user_id,)).fetchone()
         if user["balance"] < promo["final"]:
-            connection.rollback()
-            return jsonify({"ok": False, "error": "Số dư không đủ", "required": cart["total"], "balance": user["balance"]}), 409
+            raise ToolError("Số dư không đủ", 409, "insufficient_balance")
         updated = connection.execute(
             "UPDATE users SET balance=balance-? WHERE user_id=? AND balance>=?",
             (promo["final"], user_id, promo["final"]),
@@ -1946,27 +2391,20 @@ def checkout():
         return jsonify({"ok": True, "duplicate": False, "orderIds": order_ids, "total": promo["final"], "originalTotal": promo["original"], "discountAmount": promo["discount"]})
     except ToolError as error:
         connection.rollback()
-        return jsonify({"ok": False, "error": str(error), "reason_code": "promo_or_provider_config"}), error.status
+        refund_provider_results()
+        return jsonify({"ok": False, "error": str(error), "reason_code": error.reason_code}), error.status
     except ProviderError as error:
-        attempts = [dict(row) for row in connection.execute("SELECT checkout_key,provider_id,external_product_id,status,latency_ms,error_code,created_at FROM provider_attempts WHERE checkout_key LIKE ?", (f"%:{key}:%",)).fetchall()]
-        for provider_row, _item, _provider_key, result in provider_orders:
-            try:
-                external_id = result.get("order_id", result.get("id", ""))
-                if external_id:
-                    provider_for(provider_row).refund(external_id)
-            except Exception:
-                pass
         connection.rollback()
-        for attempt in attempts:
-            connection.execute("INSERT INTO provider_attempts(checkout_key,provider_id,external_product_id,status,latency_ms,error_code,created_at) VALUES(?,?,?,?,?,?,?)", tuple(attempt[field] for field in ("checkout_key", "provider_id", "external_product_id", "status", "latency_ms", "error_code", "created_at")))
-        connection.commit()
+        refund_provider_results()
         return jsonify({"ok": False, "error": str(error), "reason_code": error.reason_code}), 502
     except sqlite3.IntegrityError:
         connection.rollback()
+        refund_provider_results()
         return jsonify({"ok": False, "error": "Giao dịch trùng lặp"}), 409
-    except Exception:
+    except Exception as exc:
         connection.rollback()
-        app.logger.exception("Checkout failed for user_id=%s", user_id)
+        refund_provider_results()
+        app.logger.error("Checkout failed user_id=%s error_type=%s", user_id, type(exc).__name__)
         return jsonify({"ok": False, "error": "Không thể hoàn tất giao dịch"}), 500
 
 
@@ -1995,12 +2433,176 @@ def order(order_id):
     return jsonify({"ok": True, "item": dict(row)})
 
 
+@app.get("/api/deliveries")
+@authenticated
+def deliveries():
+    rows = db().execute(
+        """SELECT d.id,d.kind,d.status,d.warranty_until,d.delivered_at,d.account_json,
+                  w.id AS warranty_id,w.status AS warranty_status,w.resolution
+           FROM delivery_events d
+           LEFT JOIN warranty_requests w ON w.delivery_id=d.id
+           WHERE d.user_id=? ORDER BY d.id DESC LIMIT 100""",
+        (int(g.telegram_user["id"]),),
+    ).fetchall()
+    items = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["account"] = json.loads(item.pop("account_json") or "{}")
+        except json.JSONDecodeError:
+            item["account"] = {}
+        item["warrantyAvailable"] = bool(
+            item.get("warranty_until") and item["warranty_until"] >= now_iso()
+            and not item.get("warranty_id")
+        )
+        items.append(item)
+    return jsonify({"ok": True, "items": items})
+
+
+@app.get("/api/devices")
+@authenticated
+def devices():
+    current = getattr(g, "device_hash", "")
+    rows = db().execute(
+        """SELECT id,label,platform,first_seen_at,last_seen_at,revoked,device_hash
+           FROM user_devices WHERE user_id=? ORDER BY revoked,last_seen_at DESC""",
+        (int(g.telegram_user["id"]),),
+    ).fetchall()
+    return jsonify({"ok": True, "limit": DEVICE_LIMIT, "items": [
+        {"id": row["id"], "label": row["label"] or "Thiết bị", "platform": row["platform"],
+         "firstSeenAt": row["first_seen_at"], "lastSeenAt": row["last_seen_at"],
+         "revoked": bool(row["revoked"]), "current": bool(current and row["device_hash"] == current)}
+        for row in rows
+    ]})
+
+
+@app.delete("/api/devices/<int:device_id>")
+@authenticated
+def revoke_device(device_id):
+    connection = db()
+    row = connection.execute(
+        "SELECT device_hash,revoked FROM user_devices WHERE id=? AND user_id=?",
+        (device_id, int(g.telegram_user["id"])),
+    ).fetchone()
+    if not row:
+        return jsonify({"ok": False, "error": "Không tìm thấy thiết bị"}), 404
+    if row["device_hash"] == getattr(g, "device_hash", ""):
+        return jsonify({"ok": False, "error": "Không thể thu hồi thiết bị đang sử dụng", "reason_code": "current_device"}), 409
+    connection.execute("UPDATE user_devices SET revoked=1 WHERE id=?", (device_id,))
+    connection.commit()
+    return jsonify({"ok": True})
+
+
+def grant_warranty_credit(connection, delivery):
+    kind = delivery["kind"]
+    if kind == "nftoken":
+        connection.execute("UPDATE users SET nftoken_credits=nftoken_credits+1 WHERE user_id=?", (delivery["user_id"],))
+        return "Đã hoàn 1 lượt NFToken"
+    if kind == "nftoken_vip":
+        connection.execute("UPDATE users SET credits=credits+1 WHERE user_id=?", (delivery["user_id"],))
+        return "Đã hoàn 1 lượt Cookie VIP"
+    if kind == "free_cookie":
+        connection.execute(
+            "INSERT OR IGNORE INTO free_cookie_checkins(user_id,local_date,claimed,created_at) VALUES(?,?,0,?)",
+            (delivery["user_id"], local_today(), now_iso()),
+        )
+        connection.execute(
+            "UPDATE free_cookie_checkins SET claimed=claimed+1 WHERE user_id=? AND local_date=?",
+            (delivery["user_id"], local_today()),
+        )
+        return "Đã hoàn 1 lượt Cookie Free"
+    return "Đã xác nhận bảo hành; bạn có thể thử kết nối TV lại"
+
+
+@app.post("/api/warranty")
+@authenticated
+def create_warranty():
+    try:
+        body = json_body()
+        delivery_id = int(body.get("deliveryId", 0))
+        reason = str(body.get("reason", "")).strip()[:500]
+        key = normalize_nftoken_request_id(body.get("idempotencyKey"))
+    except (ValueError, TypeError, ToolError) as error:
+        return jsonify({"ok": False, "error": str(error) or "Yêu cầu không hợp lệ"}), 400
+    if len(reason) < 5:
+        return jsonify({"ok": False, "error": "Vui lòng mô tả lỗi ít nhất 5 ký tự"}), 400
+    connection = db()
+    user_id = int(g.telegram_user["id"])
+    connection.execute("BEGIN IMMEDIATE")
+    delivery = connection.execute(
+        "SELECT * FROM delivery_events WHERE id=? AND user_id=?", (delivery_id, user_id)
+    ).fetchone()
+    if not delivery:
+        connection.rollback()
+        return jsonify({"ok": False, "error": "Không tìm thấy lần giao hàng"}), 404
+    if not delivery["warranty_until"] or delivery["warranty_until"] < now_iso():
+        connection.rollback()
+        return jsonify({"ok": False, "error": "Lần giao này đã hết thời hạn bảo hành", "reason_code": "warranty_expired"}), 409
+    existing = connection.execute(
+        "SELECT id,status,resolution FROM warranty_requests WHERE delivery_id=? OR (user_id=? AND idempotency_key=?)",
+        (delivery_id, user_id, key),
+    ).fetchone()
+    if existing:
+        connection.commit()
+        return jsonify({"ok": True, "duplicate": True, **dict(existing)})
+    cursor = connection.execute(
+        """INSERT INTO warranty_requests(user_id,delivery_id,reason,status,resolution,idempotency_key,created_at,updated_at)
+           VALUES(?,?,?,'checking','',?,?,?)""",
+        (user_id, delivery_id, reason, key, now_iso(), now_iso()),
+    )
+    warranty_id = cursor.lastrowid
+    connection.commit()
+
+    table = COOKIE_TABLES.get(delivery["inventory_source"])
+    cookie = connection.execute(
+        f"SELECT data FROM {table} WHERE id=?" if table else "SELECT NULL AS data WHERE 0",
+        (delivery["inventory_id"],) if table else (),
+    ).fetchone()
+    if not cookie:
+        connection.execute(
+            "UPDATE warranty_requests SET status='pending',resolution='Cần Admin kiểm tra kho',updated_at=? WHERE id=?",
+            (now_iso(), warranty_id),
+        )
+        connection.commit()
+        telegram_notify(f"🛡 <b>Bảo hành #{warranty_id}</b> cần kiểm tra thủ công.")
+        return jsonify({"ok": True, "id": warranty_id, "status": "pending", "message": "Yêu cầu đã chuyển Admin kiểm tra"}), 202
+    success, token, error, _account, _netscape = run_cookie_check(cookie["data"], timeout=COOKIE_CHECK_TIMEOUT, request_id=f"warranty-{warranty_id}")
+    reason_code = nftoken_failure_reason(error)
+    connection.execute("BEGIN IMMEDIATE")
+    if success and token:
+        status, resolution = "rejected", "Cookie vẫn hoạt động tại thời điểm kiểm tra"
+        inventory_outcome(connection, delivery["inventory_source"], delivery["inventory_id"], True)
+    elif reason_code in {"cookie_expired", "cookie_invalid"}:
+        resolution = grant_warranty_credit(connection, delivery)
+        status = "approved"
+        inventory_outcome(connection, delivery["inventory_source"], delivery["inventory_id"], False, reason_code)
+        connection.execute("UPDATE delivery_events SET status='warranty_approved' WHERE id=?", (delivery_id,))
+    else:
+        status, resolution = "pending", "Netflix đang lỗi kết nối; Admin sẽ kiểm tra lại"
+        inventory_outcome(connection, delivery["inventory_source"], delivery["inventory_id"], False, reason_code)
+    connection.execute(
+        "UPDATE warranty_requests SET status=?,resolution=?,updated_at=? WHERE id=?",
+        (status, resolution, now_iso(), warranty_id),
+    )
+    notify(connection, user_id, "warranty", f"Bảo hành #{warranty_id}", resolution, {"status": status})
+    connection.commit()
+    return jsonify({"ok": True, "id": warranty_id, "status": status, "message": resolution})
+
+
 @app.get("/api/transactions")
 @authenticated
 def transactions():
-    rows = db().execute(
+    connection = db()
+    connection.execute(
+        """UPDATE transactions SET status='EXPIRED',review_note='Đã hết thời gian thanh toán'
+           WHERE user_id=? AND status='AWAITING_PAYMENT' AND payment_deadline IS NOT NULL
+             AND payment_deadline<?""",
+        (int(g.telegram_user["id"]), now_iso()),
+    )
+    connection.commit()
+    rows = connection.execute(
         """SELECT id,amount,status,transfer_note,created_at,submitted_at,
-                  reviewed_at,review_note
+                  reviewed_at,review_note,payment_deadline
            FROM transactions WHERE user_id=? ORDER BY id DESC LIMIT 50""",
         (int(g.telegram_user["id"]),),
     ).fetchall()
@@ -2012,12 +2614,8 @@ def transactions():
 def tools_status():
     connection = db()
     user_id = int(g.telegram_user["id"])
-    premium = connection.execute(
-        "SELECT COUNT(*) FROM premium_cookies WHERE is_used=0"
-    ).fetchone()[0]
-    free = connection.execute(
-        "SELECT COUNT(*) FROM free_cookies WHERE is_used=0"
-    ).fetchone()[0]
+    premium = available_stock_count(connection, "premium")
+    free = available_stock_count(connection, "free")
     return jsonify({"ok": True, "quota": quota_payload(connection, user_id),
                     "checkin": checkin_payload(connection, user_id),
                     "stock": {"premium": premium, "free": free}, "features": feature_flags(connection)})
@@ -2072,61 +2670,100 @@ def free_cookie():
     except ToolError as error:
         return jsonify({"ok": False, "reason_code": "feature_disabled", "error": str(error)}), error.status
     if tool_rate_limited(user_id):
-        return jsonify({"ok": False, "reason_code": "rate_limited", "error": "Bạn thao tác quá nhanh", "steps": [{"key": "validate", "label": "Kiểm tra mã TV", "status": "error"}]}), 429
-    today = local_today()
-    try:
-        connection.execute("BEGIN IMMEDIATE")
-        checkin_row = connection.execute(
-            "SELECT claimed FROM free_cookie_checkins WHERE user_id=? AND local_date=?",
-            (user_id, today),
-        ).fetchone()
-        if checkin_row and int(checkin_row["claimed"]) <= 0:
-            connection.rollback()
-            return jsonify({"ok": False, "error": "Đã hết lượt Cookie hôm nay", "reason_code": "daily_limit"}), 409
-        plan_name = connection.execute(
-            "SELECT plan_name FROM users WHERE user_id=?", (user_id,)
-        ).fetchone()[0]
-        plan = connection.execute(
-            "SELECT cookies_max FROM plans WHERE name=?", (plan_name,)
-        ).fetchone()
-        cookies_max = plan[0] if plan else 0
-        if checkin_row:
-            cookies_max = 10**9
-        connection.execute(
-            "INSERT OR IGNORE INTO usage(user_id,date) VALUES(?,?)", (user_id, today)
-        )
-        usage = connection.execute(
-            "SELECT free_cookies_used FROM usage WHERE user_id=? AND date=?",
-            (user_id, today),
-        ).fetchone()[0]
-        if usage >= cookies_max:
-            connection.rollback()
-            return jsonify({"ok": False, "reason_code": "quota_exhausted", "error": "Bạn đã hết lượt Cookie miễn phí hôm nay"}), 409
-        cookie = connection.execute(
-            "SELECT id,data FROM free_cookies WHERE is_used=0 ORDER BY id LIMIT 1"
-        ).fetchone()
-        if not cookie:
-            connection.rollback()
-            return jsonify({"ok": False, "reason_code": "stock_empty", "error": "Kho Cookie miễn phí đang trống"}), 409
-        connection.execute("UPDATE free_cookies SET is_used=1 WHERE id=? AND is_used=0", (cookie["id"],))
-        if checkin_row:
-            connection.execute("UPDATE free_cookie_checkins SET claimed=claimed-1 WHERE user_id=? AND local_date=? AND claimed>0", (user_id, today))
-        else:
-            connection.execute(
-                "UPDATE usage SET free_cookies_used=free_cookies_used+1 WHERE user_id=? AND date=?",
-                (user_id, today),
-            )
-        copyright_data = copyright_payload(connection)
-        export_cookie = watermark_export(cookie["data"], copyright_data["text"], f"FREE-{user_id}-{today}", user_id, enabled=copyright_data["enabled"], netscape=True)
-        download_url = create_secure_download(connection, user_id, 0, export_cookie, f"cookie-free-{today}.txt")
+        record_risk_event(connection, user_id, "free_cookie_rate_limit", 5, getattr(g, "device_hash", ""), str(int(time.time()) // 30))
         connection.commit()
-        return jsonify(
-            {"ok": True, "cookie": cookie["data"], "quota": quota_payload(connection, user_id),
-             "downloadUrl": download_url, "checkin": checkin_payload(connection, user_id), "copyright": copyright_data}
-        )
-    except Exception:
+        return jsonify({"ok": False, "reason_code": "rate_limited", "error": "Bạn thao tác quá nhanh"}), 429
+    today = local_today()
+    body = request.get_json(silent=True) or {}
+    try:
+        request_id = normalize_nftoken_request_id(body.get("requestId") or uuid.uuid4().hex)
+    except ToolError as error:
+        return jsonify({"ok": False, "reason_code": error.reason_code, "error": str(error)}), error.status
+    duplicate = connection.execute(
+        "SELECT id FROM delivery_events WHERE user_id=? AND kind='free_cookie' AND request_id=?",
+        (user_id, request_id),
+    ).fetchone()
+    if duplicate:
+        return jsonify({"ok": False, "reason_code": "already_delivered", "error": "Yêu cầu này đã được giao trước đó", "deliveryId": duplicate["id"]}), 409
+    last_reason = "stock_empty"
+    try:
+        for _attempt in range(3):
+            connection.execute("BEGIN IMMEDIATE")
+            checkin_row = connection.execute(
+                "SELECT claimed FROM free_cookie_checkins WHERE user_id=? AND local_date=?",
+                (user_id, today),
+            ).fetchone()
+            plan_name = connection.execute("SELECT plan_name FROM users WHERE user_id=?", (user_id,)).fetchone()[0]
+            plan = connection.execute("SELECT cookies_max FROM plans WHERE name=?", (plan_name,)).fetchone()
+            cookies_max = int(plan[0] if plan else 0)
+            connection.execute("INSERT OR IGNORE INTO usage(user_id,date) VALUES(?,?)", (user_id, today))
+            usage = int(connection.execute(
+                "SELECT free_cookies_used FROM usage WHERE user_id=? AND date=?", (user_id, today)
+            ).fetchone()[0])
+            has_checkin = bool(checkin_row and int(checkin_row["claimed"]) > 0)
+            if not has_checkin and usage >= cookies_max:
+                connection.rollback()
+                return jsonify({"ok": False, "reason_code": "quota_exhausted", "error": "Bạn đã hết lượt Cookie miễn phí hôm nay"}), 409
+            reserved = reserve_cookie_row(connection, ("free",), user_id=user_id)
+            if not reserved:
+                connection.rollback()
+                maybe_alert_low_stock(connection)
+                return jsonify({"ok": False, "reason_code": "stock_empty", "error": "Kho Cookie miễn phí đang trống"}), 409
+            cookie_id, cookie_data, _source = reserved
+            connection.commit()
+
+            success, token, check_error, account, _netscape = run_cookie_check(
+                cookie_data, timeout=COOKIE_CHECK_TIMEOUT, request_id=request_id
+            )
+            reason_code = nftoken_failure_reason(check_error)
+            if not (success and token and account.get("membership_status") == "CURRENT_MEMBER"):
+                inventory_outcome(connection, "free", cookie_id, False, reason_code)
+                connection.commit()
+                last_reason = reason_code
+                if reason_code not in {"cookie_expired", "cookie_invalid"}:
+                    break
+                continue
+
+            connection.execute("BEGIN IMMEDIATE")
+            # Re-check and consume quota atomically only after the Cookie is proven live.
+            checkin_row = connection.execute(
+                "SELECT claimed FROM free_cookie_checkins WHERE user_id=? AND local_date=?",
+                (user_id, today),
+            ).fetchone()
+            if checkin_row and int(checkin_row["claimed"]) > 0:
+                consumed = connection.execute(
+                    "UPDATE free_cookie_checkins SET claimed=claimed-1 WHERE user_id=? AND local_date=? AND claimed>0",
+                    (user_id, today),
+                )
+            else:
+                consumed = connection.execute(
+                    "UPDATE usage SET free_cookies_used=free_cookies_used+1 WHERE user_id=? AND date=? AND free_cookies_used<?",
+                    (user_id, today, cookies_max),
+                )
+            if consumed.rowcount != 1:
+                connection.rollback()
+                inventory_outcome(connection, "free", cookie_id, True)
+                connection.execute("UPDATE free_cookies SET is_used=0 WHERE id=?", (cookie_id,))
+                connection.commit()
+                return jsonify({"ok": False, "reason_code": "quota_exhausted", "error": "Bạn đã hết lượt Cookie miễn phí hôm nay"}), 409
+            inventory_outcome(connection, "free", cookie_id, True)
+            connection.execute("UPDATE free_cookies SET is_used=0 WHERE id=?", (cookie_id,))
+            copyright_data = copyright_payload(connection)
+            export_cookie = watermark_export(cookie_data, copyright_data["text"], f"FREE-{user_id}-{today}", user_id, enabled=copyright_data["enabled"], netscape=True)
+            download_url = create_secure_download(connection, user_id, 0, export_cookie, f"cookie-free-{today}.txt")
+            delivery = record_delivery(connection, user_id, "free_cookie", "free", cookie_id, request_id, account)
+            connection.commit()
+            maybe_alert_low_stock(connection)
+            return jsonify({
+                "ok": True, "cookie": cookie_data, "quota": quota_payload(connection, user_id),
+                "downloadUrl": download_url, "checkin": checkin_payload(connection, user_id),
+                "copyright": copyright_data, "deliveryId": delivery["id"] if delivery else None,
+                "warrantyUntil": delivery["warranty_until"] if delivery else None,
+            })
+        return jsonify({"ok": False, "reason_code": last_reason, "error": nftoken_failure_message(last_reason)}), (504 if last_reason == "nftoken_timeout" else 409)
+    except Exception as exc:
         connection.rollback()
-        app.logger.exception("Free cookie failed for user_id=%s", user_id)
+        app.logger.error("Free cookie failed user_id=%s error_type=%s", user_id, type(exc).__name__)
         return jsonify({"ok": False, "reason_code": "cookie_delivery_error", "error": "Không thể nhận Cookie lúc này"}), 500
 
 
@@ -2137,7 +2774,8 @@ def generate_one_nftoken(connection, user_id, mode, deadline=None, request_id=No
     last_reason_code = "cookie_unavailable"
     for attempt in range(5):
         if deadline is not None and time.monotonic() >= deadline:
-            release_cookie(connection, cookie_id, delete=False, source=cookie_source)
+            inventory_outcome(connection, cookie_source, cookie_id, False, "nftoken_timeout")
+            connection.commit()
             refund_nftoken_request(connection, user_id, quota_source)
             raise ToolError("Máy chủ xử lý quá lâu, vui lòng thử lại", 504, "nftoken_timeout")
         try:
@@ -2156,29 +2794,33 @@ def generate_one_nftoken(connection, user_id, mode, deadline=None, request_id=No
         if success and token and account.get("membership_status") == "CURRENT_MEMBER":
             # The validated Cookie is a temporary delivery hold; return it to stock.
             release_cookie(connection, cookie_id, delete=False, source=cookie_source)
+            inventory_outcome(connection, cookie_source, cookie_id, True)
             copyright_data = copyright_payload(connection)
             nftoken_text = watermark_export(f"NFToken URL: https://netflix.com/?nftoken={quote(str(token), safe='')}\n", copyright_data["text"], f"NFT-{user_id}-{int(time.time())}", user_id, enabled=copyright_data["enabled"])
             download_url = create_secure_download(connection, user_id, 0, nftoken_text, f"nftoken-{user_id}.txt")
+            delivery = record_delivery(
+                connection, user_id, "nftoken_vip" if mode == "vip" else "nftoken",
+                cookie_source, cookie_id, request_id or "", account,
+            )
             connection.commit()
             return {
                 "link": f"https://netflix.com/?nftoken={quote(str(token), safe='')}",
                 "downloadUrl": download_url,
                 "account": public_account(account),
                 "netscape": netscape,
+                "deliveryId": delivery["id"] if delivery else None,
+                "warrantyUntil": delivery["warranty_until"] if delivery else None,
             }
         last_reason_code = nftoken_failure_reason(error)
         last_error = nftoken_failure_message(last_reason_code)
-        release_cookie(
-            connection, cookie_id,
-            delete=cookie_should_delete(error, last_reason_code),
-            source=cookie_source,
-        )
+        inventory_outcome(connection, cookie_source, cookie_id, False, last_reason_code)
+        connection.commit()
         if last_reason_code == "nftoken_timeout":
             break
         if attempt < 4:
             try:
                 cookie_id, cookie_data, cookie_source = reserve_nftoken_cookie(
-                    connection, allow_free=allow_free
+                    connection, allow_free=allow_free, user_id=user_id
                 )
             except ToolError:
                 break
@@ -2211,7 +2853,7 @@ def begin_nftoken_job(connection, user_id, request_id, mode, quantity):
         """INSERT INTO nftoken_jobs(
             request_id,user_id,mode,quantity,status,result_json,reason_code,message,status_code,created_at,updated_at
         ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-        (request_id, int(user_id), mode, int(quantity), "running", "{}", "", "", 409, now, now),
+        (request_id, int(user_id), mode, int(quantity), "queued", "{}", "", "", 409, now, now),
     )
     connection.commit()
     return None, True
@@ -2228,17 +2870,51 @@ def finish_nftoken_job(connection, request_id, status, payload=None, reason_code
     connection.commit()
 
 
+def run_nftoken_background_job(request_id, user_id, mode, quantity):
+    connection = sqlite3.connect(DATABASE_PATH, timeout=30)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA busy_timeout=30000")
+    try:
+        claimed = connection.execute(
+            "UPDATE nftoken_jobs SET status='running',updated_at=? WHERE request_id=? AND status='queued'",
+            (now_iso(), request_id),
+        )
+        connection.commit()
+        if claimed.rowcount != 1:
+            return
+        results = []
+        deadline = time.monotonic() + NFTOKEN_TOTAL_TIMEOUT
+        for _ in range(quantity):
+            row = connection.execute("SELECT status FROM nftoken_jobs WHERE request_id=?", (request_id,)).fetchone()
+            if not row or row["status"] == "cancelled":
+                return
+            results.append(generate_one_nftoken(connection, user_id, mode, deadline=deadline, request_id=request_id))
+        payload = {
+            "ok": True, "request_id": request_id, "items": results,
+            "partial": len(results) != quantity, "quota": quota_payload(connection, user_id),
+        }
+        # A result already delivered upstream wins over a late cancel request.
+        finish_nftoken_job(connection, request_id, "done", payload=payload, status_code=200)
+    except ToolError as error:
+        finish_nftoken_job(connection, request_id, "error", reason_code=error.reason_code, message=str(error), status_code=error.status)
+    except Exception as error:
+        app.logger.error("NFToken background job failed request_id=%s type=%s", request_id, type(error).__name__)
+        finish_nftoken_job(connection, request_id, "error", reason_code="nftoken_failed", message="Không tạo được NFToken lúc này", status_code=500)
+    finally:
+        connection.close()
+
+
 def nftoken_job_payload(row):
     if row["status"] == "done":
         payload = json.loads(row["result_json"] or "{}")
         payload["request_id"] = row["request_id"]
         payload["duplicate"] = True
         return payload, 200
-    if row["status"] == "running":
+    if row["status"] in {"queued", "running"}:
         return {
             "ok": False,
             "request_id": row["request_id"],
-            "status": "running",
+            "status": row["status"],
             "reason_code": "nftoken_in_progress",
             "error": "NFToken đang được xử lý, vui lòng chờ kết quả",
         }, 409
@@ -2258,6 +2934,7 @@ def create_nftoken():
         body = json_body()
         mode = str(body.get("mode", "plan"))
         quantity = int(body.get("quantity", 1))
+        background = bool(body.get("background", False))
     except (ValueError, TypeError) as error:
         return jsonify({"ok": False, "error": str(error) or "Dữ liệu không hợp lệ"}), 400
     if mode not in {"plan", "vip"}:
@@ -2286,8 +2963,18 @@ def create_nftoken():
         payload, status_code = nftoken_job_payload(existing)
         return jsonify(payload), status_code
     if tool_rate_limited(user_id, limit=5, window=60):
+        record_risk_event(connection, user_id, "nftoken_rate_limit", 8, getattr(g, "device_hash", ""), request_id)
+        connection.commit()
         finish_nftoken_job(connection, request_id, "error", reason_code="rate_limited", message="Bạn thao tác quá nhanh", status_code=429)
         return jsonify({"ok": False, "request_id": request_id, "reason_code": "rate_limited", "error": "Bạn thao tác quá nhanh"}), 429
+    if background:
+        NFTOKEN_JOB_EXECUTOR.submit(run_nftoken_background_job, request_id, user_id, mode, quantity)
+        return jsonify({"ok": True, "request_id": request_id, "status": "queued", "job_id": request_id}), 202
+    connection.execute(
+        "UPDATE nftoken_jobs SET status='running',updated_at=? WHERE request_id=? AND status='queued'",
+        (now_iso(), request_id),
+    )
+    connection.commit()
     results = []
     deadline = time.monotonic() + NFTOKEN_TOTAL_TIMEOUT
     try:
@@ -2329,9 +3016,40 @@ def get_nftoken_job(request_id):
     ).fetchone()
     if not row:
         return jsonify({"ok": False, "reason_code": "job_not_found", "error": "Không tìm thấy yêu cầu NFToken"}), 404
+    if row["status"] in {"queued", "running"}:
+        return jsonify({
+            "ok": True, "request_id": row["request_id"], "job_id": row["request_id"],
+            "status": row["status"], "progress": {"current": 0, "total": int(row["quantity"])},
+        })
     payload, status_code = nftoken_job_payload(row)
     payload["status"] = row["status"]
     return jsonify(payload), status_code
+
+
+@app.post("/api/tools/nftoken/job/<request_id>/cancel")
+@authenticated
+def cancel_nftoken_job(request_id):
+    try:
+        normalized_id = normalize_nftoken_request_id(request_id)
+    except ToolError as error:
+        return jsonify({"ok": False, "reason_code": error.reason_code, "error": str(error)}), error.status
+    connection = db()
+    updated = connection.execute(
+        """UPDATE nftoken_jobs SET status='cancelled',reason_code='cancelled',
+               message='Đã hủy theo yêu cầu',updated_at=?
+           WHERE request_id=? AND user_id=? AND status='queued'""",
+        (now_iso(), normalized_id, int(g.telegram_user["id"])),
+    )
+    connection.commit()
+    if updated.rowcount:
+        return jsonify({"ok": True, "status": "cancelled"})
+    row = connection.execute(
+        "SELECT status FROM nftoken_jobs WHERE request_id=? AND user_id=?",
+        (normalized_id, int(g.telegram_user["id"])),
+    ).fetchone()
+    if not row:
+        return jsonify({"ok": False, "error": "Không tìm thấy yêu cầu"}), 404
+    return jsonify({"ok": False, "reason_code": "job_not_cancellable", "error": "Job đã bắt đầu; kết quả sẽ được lưu để không mất lượt", "status": row["status"]}), 409
 
 
 @app.post("/api/tools/tv-login")
@@ -2362,55 +3080,56 @@ def tv_login():
         return jsonify({"ok": False, "reason_code": "invalid_code", "error": "Mã TV phải gồm đúng 8 chữ số", "steps": steps("validate", True)}), 400
     user_id = int(g.telegram_user["id"])
     if tool_rate_limited(user_id, limit=3, window=60):
+        risk_connection = db()
+        record_risk_event(risk_connection, user_id, "tv_rate_limit", 8, getattr(g, "device_hash", ""), str(int(time.time()) // 60))
+        risk_connection.commit()
         return jsonify({"ok": False, "reason_code": "rate_limited", "error": "Bạn thao tác quá nhanh"}), 429
     connection = db()
     try:
         require_feature(connection, "tv")
     except ToolError as error:
         return jsonify({"ok": False, "reason_code": "feature_disabled", "error": str(error), "steps": steps("validate", True)}), error.status
-    cookie_id = None
-    reserved_cookie_ids = []
-
-    def release_reserved_cookies():
-        while reserved_cookie_ids:
-            reserved_id = reserved_cookie_ids.pop()
-            release_cookie(connection, reserved_id, delete=False)
-
     try:
         last_message = "Kho Cookie Premium đang trống"
         last_reason_code = "cookie_unavailable"
         for _attempt in range(3):
-            cookie_id, cookie_data = reserve_cookie(connection)
-            reserved_cookie_ids.append(cookie_id)
+            cookie_id, cookie_data = reserve_cookie(connection, user_id=user_id)
             success, reason_code, message, account = run_tv_login(cookie_data, tv_code)
             last_reason_code = reason_code
             last_message = message
             dead_cookie = reason_code in ("cookie_expired", "cookie_format")
-            cookie_id = None
             if success:
-                release_reserved_cookies()
+                release_cookie(connection, cookie_id, delete=False)
+                inventory_outcome(connection, "premium", cookie_id, True)
+                delivery = record_delivery(
+                    connection, user_id, "tv_login", "premium", cookie_id,
+                    f"tv-{user_id}-{uuid.uuid4().hex}", account,
+                )
+                connection.commit()
                 return jsonify({
                     "ok": True,
                     "reason_code": "connected",
                     "message": "TV đã được kết nối",
                     "account": public_account(account),
+                    "deliveryId": delivery["id"] if delivery else None,
                     "steps": steps("done"),
                 })
+            inventory_outcome(connection, "premium", cookie_id, False, reason_code)
+            connection.commit()
             if not dead_cookie:
-                release_reserved_cookies()
                 failed_stage = "browser" if reason_code in ("browser_missing", "webdriver_missing", "webdriver_error", "browser_error", "network_timeout", "selector_changed", "submit_failed") else "connect"
                 return jsonify({"ok": False, "reason_code": reason_code, "error": message, "steps": steps(failed_stage, True)}), 409
 
-        release_reserved_cookies()
         return jsonify({"ok": False, "reason_code": last_reason_code, "error": last_message, "steps": steps("cookie", True)}), 409
     except ToolError as error:
-        release_reserved_cookies()
         reason_code = last_reason_code if last_reason_code != "cookie_unavailable" else "cookie_unavailable"
         message = last_message if last_reason_code != "cookie_unavailable" else str(error)
         return jsonify({"ok": False, "reason_code": reason_code, "error": message, "steps": steps("cookie", True)}), error.status
-    except Exception:
-        release_reserved_cookies()
-        app.logger.exception("TV login failed for user_id=%s", user_id)
+    except Exception as exc:
+        if 'cookie_id' in locals() and cookie_id is not None:
+            inventory_outcome(connection, "premium", cookie_id, False, "server_error")
+            connection.commit()
+        app.logger.error("TV login failed user_id=%s error_type=%s", user_id, type(exc).__name__)
         return jsonify({"ok": False, "reason_code": "server_error", "error": "Không thể đăng nhập TV lúc này", "steps": steps("browser", True)}), 500
 
 
@@ -2462,11 +3181,12 @@ def create_deposit():
     except ToolError as error:
         return jsonify({"ok": False, "error": str(error)}), error.status
     user_id = int(g.telegram_user["id"])
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = now_iso()
+    payment_deadline = (datetime.now(LOCAL_TZ) + timedelta(minutes=30)).replace(tzinfo=None).isoformat(timespec="seconds")
     cursor = connection.execute(
-        """INSERT INTO transactions(user_id,amount,status,created_at)
-           VALUES(?,?,'AWAITING_PAYMENT',?)""",
-        (user_id, amount, now),
+        """INSERT INTO transactions(user_id,amount,status,created_at,payment_deadline)
+           VALUES(?,?,'AWAITING_PAYMENT',?,?)""",
+        (user_id, amount, now, payment_deadline),
     )
     transaction_id = cursor.lastrowid
     transfer_note = f"NAP {user_id} GD{transaction_id}"
@@ -2486,7 +3206,8 @@ def create_deposit():
         )
     return jsonify(
         {"ok": True, "transactionId": transaction_id, "amount": amount,
-         "status": "AWAITING_PAYMENT", "transferNote": transfer_note, "qrUrl": qr_url}
+         "status": "AWAITING_PAYMENT", "transferNote": transfer_note, "qrUrl": qr_url,
+         "paymentDeadline": payment_deadline}
     )
 
 
@@ -2519,13 +3240,89 @@ def submit_deposit(transaction_id):
     return jsonify({"ok": True, "transactionId": transaction_id, "status": "PENDING"})
 
 
+def reconcile_payment(connection, transaction_id, provider, reference, amount, payload_hash=""):
+    connection.execute("BEGIN IMMEDIATE")
+    existing = connection.execute(
+        "SELECT transaction_id,status FROM payment_events WHERE provider=? AND provider_reference=?",
+        (provider, reference),
+    ).fetchone()
+    if existing:
+        connection.commit()
+        return {"ok": True, "duplicate": True, "transactionId": existing["transaction_id"]}
+    transaction = connection.execute(
+        "SELECT user_id,amount,status FROM transactions WHERE id=?", (int(transaction_id),)
+    ).fetchone()
+    if not transaction:
+        connection.rollback()
+        raise ToolError("Không tìm thấy giao dịch", 404, "transaction_not_found")
+    if int(transaction["amount"]) != int(amount):
+        connection.rollback()
+        raise ToolError("Số tiền đối soát không khớp", 409, "amount_mismatch")
+    if transaction["status"] in {"REJECTED", "EXPIRED"}:
+        connection.rollback()
+        raise ToolError("Giao dịch không còn hiệu lực", 409, "transaction_inactive")
+    if transaction["status"] != "APPROVED":
+        connection.execute(
+            "UPDATE transactions SET status='APPROVED',reviewed_at=?,review_note=?,provider_reference=? WHERE id=?",
+            (now_iso(), f"Đối soát tự động qua {provider}", reference, int(transaction_id)),
+        )
+        connection.execute(
+            "UPDATE users SET balance=balance+? WHERE user_id=?",
+            (int(amount), int(transaction["user_id"])),
+        )
+    connection.execute(
+        """INSERT INTO payment_events(transaction_id,provider,provider_reference,amount,status,received_at,payload_hash)
+           VALUES(?,?,?,?, 'approved',?,?)""",
+        (int(transaction_id), provider, reference, int(amount), now_iso(), payload_hash),
+    )
+    notify(connection, int(transaction["user_id"]), "payment", "Nạp tiền thành công", f"Giao dịch #{transaction_id} đã được cộng vào số dư")
+    connection.commit()
+    return {"ok": True, "duplicate": False, "transactionId": int(transaction_id)}
+
+
+@app.post("/api/payments/webhook/<provider>")
+def payment_webhook(provider):
+    secret = os.getenv("PAYMENT_WEBHOOK_SECRET", "").strip()
+    if not secret:
+        return jsonify({"ok": False, "error": "Webhook thanh toán chưa được cấu hình"}), 503
+    raw = request.get_data(cache=True)
+    signature = request.headers.get("X-Payment-Signature", "").strip().lower()
+    expected = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+    if not signature or not hmac.compare_digest(signature, expected):
+        return jsonify({"ok": False, "error": "Chữ ký webhook không hợp lệ"}), 401
+    try:
+        body = request.get_json(force=True)
+        transaction_id = int(body.get("transactionId", 0))
+        amount = int(body.get("amount", 0))
+        reference = str(body.get("reference", "")).strip()[:100]
+        status = str(body.get("status", "paid")).lower()
+    except (TypeError, ValueError, AttributeError):
+        return jsonify({"ok": False, "error": "Payload webhook không hợp lệ"}), 400
+    provider = re.sub(r"[^a-z0-9_.-]", "", provider.lower())[:40]
+    if not provider or not reference or status not in {"paid", "approved", "success"}:
+        return jsonify({"ok": False, "error": "Giao dịch webhook chưa thành công"}), 409
+    try:
+        result = reconcile_payment(
+            db(), transaction_id, provider, reference, amount,
+            hashlib.sha256(raw).hexdigest(),
+        )
+        return jsonify(result)
+    except ToolError as error:
+        return jsonify({"ok": False, "error": str(error), "reason_code": error.reason_code}), error.status
+
+
 @app.post("/api/support")
 @authenticated
 def support_request():
     try:
-        message = str(json_body().get("message", "")).strip()
-    except ValueError as error:
+        body = json_body()
+        message = str(body.get("message", "")).strip()
+        category = str(body.get("category", "general")).strip().lower()
+        order_id = int(body.get("orderId", 0) or 0) or None
+    except (ValueError, TypeError) as error:
         return jsonify({"ok": False, "error": str(error)}), 400
+    if category not in {"general", "order", "payment", "nftoken", "cookie", "tv"}:
+        return jsonify({"ok": False, "error": "Nhóm hỗ trợ không hợp lệ"}), 400
     if not 5 <= len(message) <= 1500:
         return jsonify({"ok": False, "error": "Nội dung hỗ trợ phải từ 5 đến 1500 ký tự"}), 400
     connection = db()
@@ -2534,9 +3331,21 @@ def support_request():
     except ToolError as error:
         return jsonify({"ok": False, "error": str(error)}), error.status
     user_id = int(g.telegram_user["id"])
+    if order_id and not connection.execute(
+        "SELECT 1 FROM purchase_history WHERE id=? AND user_id=?", (order_id, user_id)
+    ).fetchone():
+        return jsonify({"ok": False, "error": "Đơn hàng không thuộc tài khoản này"}), 403
+    open_count = connection.execute(
+        "SELECT COUNT(*) FROM miniapp_support WHERE user_id=? AND status='OPEN'", (user_id,)
+    ).fetchone()[0]
+    if int(open_count) >= 5:
+        record_risk_event(connection, user_id, "support_spam", 10, getattr(g, "device_hash", ""), str(int(time.time()) // 300))
+        connection.commit()
+        return jsonify({"ok": False, "error": "Bạn đang có quá nhiều yêu cầu chưa xử lý", "reason_code": "support_limit"}), 429
     cursor = connection.execute(
-        "INSERT INTO miniapp_support(user_id,message,created_at) VALUES(?,?,?)",
-        (user_id, message, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        """INSERT INTO miniapp_support(user_id,message,order_id,category,priority,created_at,updated_at)
+           VALUES(?,?,?,?,?,?,?)""",
+        (user_id, message, order_id, category, "high" if category in {"payment", "order"} else "normal", now_iso(), now_iso()),
     )
     connection.commit()
     ticket_id = cursor.lastrowid
@@ -2545,6 +3354,17 @@ def support_request():
         f"User ID: <code>{user_id}</code>\nNội dung: {html.escape(message)}"
     )
     return jsonify({"ok": True, "ticketId": ticket_id})
+
+
+@app.get("/api/support")
+@authenticated
+def support_history():
+    rows = db().execute(
+        """SELECT id,order_id,category,priority,message,status,admin_reply,created_at,updated_at
+           FROM miniapp_support WHERE user_id=? ORDER BY id DESC LIMIT 50""",
+        (int(g.telegram_user["id"]),),
+    ).fetchall()
+    return jsonify({"ok": True, "items": [dict(row) for row in rows]})
 
 
 def admin_product_values(body):
@@ -2722,7 +3542,8 @@ def admin_dashboard():
     providers = connection.execute("SELECT * FROM product_providers ORDER BY id DESC").fetchall()
     rank_settings = connection.execute("SELECT * FROM customer_rank_settings ORDER BY CASE rank WHEN 'Bronze' THEN 1 WHEN 'Silver' THEN 2 WHEN 'Platinum' THEN 3 ELSE 4 END").fetchall()
     tickets = connection.execute(
-        """SELECT s.id,s.user_id,u.username,s.message,s.status,s.created_at
+        """SELECT s.id,s.user_id,u.username,s.message,s.status,s.created_at,s.updated_at,
+                  s.order_id,s.category,s.priority,s.admin_reply
            FROM miniapp_support s LEFT JOIN users u ON u.user_id=s.user_id
            ORDER BY CASE WHEN s.status='OPEN' THEN 0 ELSE 1 END,s.id DESC LIMIT 50"""
     ).fetchall()
@@ -2736,6 +3557,34 @@ def admin_dashboard():
         """SELECT id,admin_id,action,target,details,created_at
            FROM miniapp_admin_audit ORDER BY id DESC LIMIT 100"""
     ).fetchall()
+    warranties = connection.execute(
+        """SELECT w.id,w.user_id,w.delivery_id,w.reason,w.status,w.resolution,w.created_at,w.updated_at,
+                  d.kind,d.warranty_until
+           FROM warranty_requests w JOIN delivery_events d ON d.id=w.delivery_id
+           ORDER BY CASE w.status WHEN 'pending' THEN 0 WHEN 'checking' THEN 1 ELSE 2 END,w.id DESC LIMIT 100"""
+    ).fetchall()
+    risk_users = connection.execute(
+        """SELECT r.user_id,u.username,MIN(100,SUM(r.score)) AS risk_score,COUNT(*) AS events,
+                  MAX(r.created_at) AS last_event
+           FROM risk_events r LEFT JOIN users u ON u.user_id=r.user_id
+           WHERE r.created_at>=? GROUP BY r.user_id,u.username
+           ORDER BY risk_score DESC,last_event DESC LIMIT 50""",
+        ((datetime.now(LOCAL_TZ) - timedelta(days=30)).replace(tzinfo=None).isoformat(timespec="seconds"),),
+    ).fetchall()
+    provider_metrics = connection.execute(
+        "SELECT status,COUNT(*) AS count,COALESCE(AVG(latency_ms),0) AS avg_ms FROM provider_attempts GROUP BY status"
+    ).fetchall()
+    delivery_metrics = connection.execute(
+        "SELECT status,COUNT(*) AS count FROM delivery_events GROUP BY status"
+    ).fetchall()
+    revenue_periods = {}
+    for key, days in (("today", 0), ("week", 7), ("month", 30)):
+        start = datetime.now(LOCAL_TZ).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days)
+        revenue_periods[key] = connection.execute(
+            """SELECT COALESCE(SUM(CASE WHEN final_price>0 THEN final_price ELSE price END),0)
+               FROM purchase_history WHERE date>=? AND status NOT IN ('CANCELLED','REFUNDED')""",
+            (start.replace(tzinfo=None).isoformat(timespec="seconds"),),
+        ).fetchone()[0]
     stats = {
         "users": connection.execute("SELECT COUNT(*) FROM users").fetchone()[0],
         "revenue": connection.execute("SELECT COALESCE(SUM(price),0) FROM purchase_history").fetchone()[0],
@@ -2743,12 +3592,8 @@ def admin_dashboard():
         "pendingDeposits": connection.execute(
             "SELECT COUNT(*) FROM transactions WHERE status='PENDING'"
         ).fetchone()[0],
-        "premiumStock": connection.execute(
-            "SELECT COUNT(*) FROM premium_cookies WHERE is_used=0"
-        ).fetchone()[0],
-        "freeStock": connection.execute(
-            "SELECT COUNT(*) FROM free_cookies WHERE is_used=0"
-        ).fetchone()[0],
+        "premiumStock": available_stock_count(connection, "premium"),
+        "freeStock": available_stock_count(connection, "free"),
         "premiumUsed": connection.execute(
             "SELECT COUNT(*) FROM premium_cookies WHERE is_used=1"
         ).fetchone()[0],
@@ -2758,6 +3603,13 @@ def admin_dashboard():
         "openTickets": connection.execute(
             "SELECT COUNT(*) FROM miniapp_support WHERE status='OPEN'"
         ).fetchone()[0],
+        "pendingWarranties": connection.execute(
+            "SELECT COUNT(*) FROM warranty_requests WHERE status IN ('pending','checking')"
+        ).fetchone()[0],
+        "quarantinedStock": sum(connection.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE health_status='quarantined'"
+        ).fetchone()[0] for table in COOKIE_TABLES.values()),
+        "riskUsers": len(risk_users),
     }
     return jsonify({
         "ok": True,
@@ -2770,6 +3622,13 @@ def admin_dashboard():
         "providers": [provider_public(row) for row in providers],
         "ranks": [dict(row) for row in rank_settings],
         "tickets": [dict(row) for row in tickets],
+        "warranties": [dict(row) for row in warranties],
+        "riskUsers": [dict(row) for row in risk_users],
+        "metrics": {
+            "revenue": revenue_periods,
+            "providers": [dict(row) for row in provider_metrics],
+            "deliveries": [dict(row) for row in delivery_metrics],
+        },
         "orders": [dict(row) for row in orders],
         "audit": [dict(row) for row in audit],
         "settings": {
@@ -2777,6 +3636,11 @@ def admin_dashboard():
             "announcement": app_setting(connection, "announcement", ""),
             "features": feature_flags(connection),
             "trial": trial_settings(connection),
+            "operations": {
+                "deliveryWarrantyDays": bounded_setting_int(connection, "delivery_warranty_days", 1, 0, 365),
+                "lowStockThreshold": bounded_setting_int(connection, "low_stock_threshold", 5, 0, 100000),
+                "deviceLimit": DEVICE_LIMIT,
+            },
         },
     })
 
@@ -2799,17 +3663,17 @@ def admin_create_product():
         admin_audit(connection, "product.create", cursor.lastrowid, values[0])
         connection.commit()
         return jsonify({"ok": True, "id": cursor.lastrowid})
-    except sqlite3.OperationalError:
+    except sqlite3.OperationalError as exc:
         connection.rollback()
-        app.logger.exception("Admin product create database error")
+        app.logger.error("Admin product create database error_type=%s", type(exc).__name__)
         return jsonify({"ok": False, "reason_code": "database_schema_error", "error": "Database sản phẩm chưa sẵn sàng, hãy khởi động lại Mini App"}), 500
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
         connection.rollback()
-        app.logger.exception("Admin product create sqlite error")
+        app.logger.error("Admin product create sqlite error_type=%s", type(exc).__name__)
         return jsonify({"ok": False, "reason_code": "product_database_error", "error": "Không thể lưu sản phẩm vào database"}), 500
-    except Exception:
+    except Exception as exc:
         connection.rollback()
-        app.logger.exception("Admin product create unexpected error")
+        app.logger.error("Admin product create unexpected error_type=%s", type(exc).__name__)
         return jsonify({"ok": False, "reason_code": "product_create_failed", "error": "Không thể tạo sản phẩm lúc này"}), 500
 
 
@@ -2859,9 +3723,9 @@ def admin_delete_product(item_id):
         admin_audit(connection, "product.delete", item_id, product["name"])
         connection.commit()
         return jsonify({"ok": True, "deleted": True})
-    except sqlite3.Error:
+    except sqlite3.Error as exc:
         connection.rollback()
-        app.logger.exception("Admin product delete sqlite error")
+        app.logger.error("Admin product delete sqlite error_type=%s", type(exc).__name__)
         return jsonify({"ok": False, "reason_code": "product_delete_failed", "error": "Không thể xoá sản phẩm lúc này"}), 500
 
 
@@ -3127,7 +3991,7 @@ def admin_update_support(ticket_id):
         status = str(json_body().get("status", "")).upper()
     except ValueError as error:
         return jsonify({"ok": False, "error": str(error)}), 400
-    if status not in {"OPEN", "CLOSED"}:
+    if status not in {"OPEN", "IN_PROGRESS", "CLOSED"}:
         return jsonify({"ok": False, "error": "Trạng thái không hợp lệ"}), 400
     connection = db()
     updated = connection.execute(
@@ -3162,7 +4026,10 @@ def admin_reply_support(ticket_id):
     )
     if not delivered:
         return jsonify({"ok": False, "error": "Không gửi được tin nhắn Telegram cho người dùng"}), 502
-    connection.execute("UPDATE miniapp_support SET status='CLOSED' WHERE id=?", (ticket_id,))
+    connection.execute(
+        "UPDATE miniapp_support SET status='CLOSED',admin_reply=?,updated_at=? WHERE id=?",
+        (message, now_iso(), ticket_id),
+    )
     admin_audit(connection, "support.reply", ticket_id, "Telegram reply delivered")
     connection.commit()
     return jsonify({"ok": True})
@@ -3183,10 +4050,16 @@ def admin_update_settings():
             raise TypeError("settings objects required")
         trial_nftoken_limit = int(trial.get("nftokenDailyLimit", 2))
         trial_cookie_limit = int(trial.get("cookieDailyLimit", 2))
+        operations = body.get("operations", {})
+        if not isinstance(operations, dict):
+            raise TypeError("operations object required")
+        warranty_days = int(operations.get("deliveryWarrantyDays", bounded_setting_int(connection, "delivery_warranty_days", 1, 0, 365)))
+        low_stock_threshold = int(operations.get("lowStockThreshold", bounded_setting_int(connection, "low_stock_threshold", 5, 0, 100000)))
     except (AttributeError, TypeError, ValueError):
         return jsonify({"ok": False, "error": "Hạn mức trải nghiệm phải là số"}), 400
     if (len(announcement) > 500 or not 0 <= trial_nftoken_limit <= 1000
-            or not 0 <= trial_cookie_limit <= 1000):
+            or not 0 <= trial_cookie_limit <= 1000 or not 0 <= warranty_days <= 365
+            or not 0 <= low_stock_threshold <= 100000):
         return jsonify({"ok": False, "error": "Cấu hình hệ thống không hợp lệ"}), 400
     connection.execute(
         "INSERT OR REPLACE INTO miniapp_settings(key,value) VALUES('maintenance',?)",
@@ -3210,6 +4083,13 @@ def admin_update_settings():
     for key, value in trial_values.items():
         connection.execute(
             "INSERT OR REPLACE INTO miniapp_settings(key,value) VALUES(?,?)", (key, value)
+        )
+    for key, value in {
+        "delivery_warranty_days": warranty_days,
+        "low_stock_threshold": low_stock_threshold,
+    }.items():
+        connection.execute(
+            "INSERT OR REPLACE INTO miniapp_settings(key,value) VALUES(?,?)", (key, str(value))
         )
     admin_audit(
         connection, "settings.update", "miniapp",
@@ -3601,6 +4481,128 @@ def mark_notifications_read():
             connection.execute(f"UPDATE notifications SET is_read=1 WHERE id IN ({','.join('?' for _ in ids)}) AND (user_id=? OR user_id IS NULL)", (*ids, user_id))
     connection.commit()
     return jsonify({"ok": True})
+
+
+@app.put("/api/admin/warranties/<int:warranty_id>")
+@admin_required
+def admin_resolve_warranty(warranty_id):
+    try:
+        body = json_body()
+        status = str(body.get("status", "")).strip().lower()
+        note = str(body.get("note", "")).strip()[:500]
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    if status not in {"approved", "rejected", "pending"}:
+        return jsonify({"ok": False, "error": "Trạng thái bảo hành không hợp lệ"}), 400
+    connection = db()
+    connection.execute("BEGIN IMMEDIATE")
+    row = connection.execute(
+        """SELECT w.id,w.status,d.id AS delivery_id,d.user_id,d.kind
+           FROM warranty_requests w JOIN delivery_events d ON d.id=w.delivery_id WHERE w.id=?""",
+        (warranty_id,),
+    ).fetchone()
+    if not row:
+        connection.rollback()
+        return jsonify({"ok": False, "error": "Không tìm thấy yêu cầu bảo hành"}), 404
+    resolution = note or ("Admin đã duyệt bảo hành" if status == "approved" else "Admin đã từ chối bảo hành" if status == "rejected" else "Đang chờ kiểm tra lại")
+    if status == "approved" and row["status"] != "approved":
+        resolution = f"{grant_warranty_credit(connection, row)}. {resolution}".strip()
+        connection.execute("UPDATE delivery_events SET status='warranty_approved' WHERE id=?", (row["delivery_id"],))
+    connection.execute(
+        "UPDATE warranty_requests SET status=?,resolution=?,updated_at=? WHERE id=?",
+        (status, resolution, now_iso(), warranty_id),
+    )
+    notify(connection, row["user_id"], "warranty", f"Bảo hành #{warranty_id}", resolution, {"status": status})
+    admin_audit(connection, "warranty.resolve", warranty_id, f"status={status}")
+    connection.commit()
+    return jsonify({"ok": True, "status": status, "message": resolution})
+
+
+@app.post("/api/admin/inventory/<kind>/scan")
+@admin_required
+def admin_scan_inventory(kind):
+    if kind not in COOKIE_TABLES:
+        return jsonify({"ok": False, "error": "Loại kho không hợp lệ"}), 404
+    body = request.get_json(silent=True) or {}
+    try:
+        limit = max(1, min(int(body.get("limit", 100)), 1000))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Giới hạn kiểm tra không hợp lệ"}), 400
+    table = COOKIE_TABLES[kind]
+    rows = db().execute(
+        f"""SELECT id,data FROM {table} WHERE is_used=0
+            ORDER BY CASE health_status WHEN 'unknown' THEN 0 WHEN 'quarantined' THEN 1 ELSE 2 END,
+                     last_checked_at ASC,id ASC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    if not rows:
+        return jsonify({"ok": True, "job_id": "", "total": 0})
+    job_id = uuid.uuid4().hex
+    with UPLOAD_JOBS_LOCK:
+        UPLOAD_JOBS[job_id] = {"status": "running", "progress": {"checked": 0, "total": len(rows), "percent": 0}, "result": None}
+    threading.Thread(
+        target=_bg_inventory_scan_worker,
+        args=(job_id, kind, [dict(row) for row in rows], int(g.telegram_user["id"])),
+        daemon=True,
+        name=f"inventory-scan-{kind}",
+    ).start()
+    return jsonify({"ok": True, "job_id": job_id, "total": len(rows)}), 202
+
+
+@app.post("/api/admin/inventory/<kind>/release-quarantine")
+@admin_required
+def admin_release_quarantine(kind):
+    table = COOKIE_TABLES.get(kind)
+    if not table:
+        return jsonify({"ok": False, "error": "Loại kho không hợp lệ"}), 404
+    connection = db()
+    updated = connection.execute(
+        f"""UPDATE {table} SET health_status='unknown',quarantine_until=NULL,is_used=0
+            WHERE health_status='quarantined'"""
+    )
+    admin_audit(connection, "inventory.release_quarantine", kind, f"released={updated.rowcount}")
+    connection.commit()
+    return jsonify({"ok": True, "released": updated.rowcount})
+
+
+@app.post("/api/admin/payments/reconcile")
+@admin_required
+def admin_reconcile_payment():
+    try:
+        body = json_body()
+        transaction_id = int(body.get("transactionId", 0))
+        amount = int(body.get("amount", 0))
+        reference = str(body.get("reference", "")).strip()[:100]
+        provider = re.sub(r"[^a-z0-9_.-]", "", str(body.get("provider", "manual")).lower())[:40] or "manual"
+    except (ValueError, TypeError):
+        return jsonify({"ok": False, "error": "Dữ liệu đối soát không hợp lệ"}), 400
+    if not reference:
+        return jsonify({"ok": False, "error": "Thiếu mã tham chiếu giao dịch"}), 400
+    try:
+        result = reconcile_payment(db(), transaction_id, provider, reference, amount)
+        admin_audit(db(), "payment.reconcile", transaction_id, f"provider={provider}")
+        db().commit()
+        return jsonify(result)
+    except ToolError as error:
+        return jsonify({"ok": False, "error": str(error), "reason_code": error.reason_code}), error.status
+
+
+@app.get("/api/admin/operations")
+@admin_required
+def admin_operations():
+    connection = db()
+    run_maintenance_tasks(connection, force=bool(request.args.get("refresh")))
+    latest_backup = connection.execute(
+        "SELECT status,created_at FROM service_events WHERE service='backup' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return jsonify({
+        "ok": True,
+        "database": "ok",
+        "uptimeSeconds": max(0, int(time.time() - PROCESS_STARTED_AT)),
+        "latestBackup": dict(latest_backup) if latest_backup else None,
+        "risk": {"users": connection.execute("SELECT COUNT(DISTINCT user_id) FROM risk_events").fetchone()[0]},
+        "jobs": {"running": sum(1 for item in UPLOAD_JOBS.values() if item.get("status") == "running")},
+    })
 
 
 @app.get("/api/preferences/language")

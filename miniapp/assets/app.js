@@ -1,9 +1,9 @@
-import {api} from "./api.js?v=18";
+import {api} from "./api.js?v=19";
 import {state, subscribe, update} from "./state.js";
-import {bottomNav, header, toast} from "./components.js?v=18";
-import {accountView, addToCart, claimFreeCookie, homeView, openCart, openCheckin, openDeposit, openGiftcode, openHelp, openMissions, openNftoken, openNotifications, openOrder, openProduct, openReferral, openSupport, openTvLogin, ordersView, storeView, toolsView} from "./views.js?v=18";
-import {adminView, bindAdminEvents, loadAdmin} from "./admin.js?v=18";
-import {translateDom, translateText} from "./i18n.js?v=2";
+import {bottomNav, header, toast} from "./components.js?v=19";
+import {accountView, addToCart, claimFreeCookie, homeView, openCart, openCheckin, openDeliveries, openDeposit, openDevices, openGiftcode, openHelp, openMissions, openNftoken, openNotifications, openOrder, openProduct, openReferral, openSupport, openTvLogin, ordersView, storeView, toolsView} from "./views.js?v=19";
+import {adminView, bindAdminEvents, loadAdmin} from "./admin.js?v=19";
+import {translateDom, translateText} from "./i18n.js?v=3";
 
 const tg = window.Telegram?.WebApp;
 const app = document.querySelector("#app");
@@ -89,6 +89,8 @@ function bindEvents() {
   document.querySelectorAll("[data-action='cart']").forEach((node) => node.onclick = openCart);
   document.querySelectorAll("[data-action='deposit']").forEach((node) => node.onclick = openDeposit);
   document.querySelectorAll("[data-action='support']").forEach((node) => node.onclick = openSupport);
+  document.querySelectorAll("[data-action='deliveries']").forEach((node) => node.onclick = openDeliveries);
+  document.querySelectorAll("[data-action='devices']").forEach((node) => node.onclick = openDevices);
   document.querySelectorAll("[data-action='notifications']").forEach((node) => node.onclick = openNotifications);
   document.querySelectorAll("[data-action='install']").forEach((node) => node.onclick = installPwa);
   document.querySelector("[data-language]")?.addEventListener("change", async (event) => {

@@ -1969,8 +1969,8 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
                 info['cc_type'] = cc_map.get(pm, info['payment_method'])
 
 
-        except Exception as e:
-            logger.error(f"get_account_info error: {e}")
+        except Exception as exc:
+            logger.error("get_account_info failed error_type=%s", type(exc).__name__)
 
         normalized = normalize_account_payload(info)
         normalized.pop('_account_name_candidates', None)
@@ -2075,8 +2075,8 @@ VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW'''.split())
                 except requests.exceptions.ConnectionError:
                     last_error = "Loi ket noi"
                     saw_network_error = True
-                except Exception as e:
-                    last_error = str(e)[:50]
+                except Exception as exc:
+                    last_error = f"Loi xu ly ({type(exc).__name__})"
                 if deadline is not None:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
@@ -2615,8 +2615,8 @@ async def reset_bot_menu(application):
             )
         )
         logger.info("Telegram menu configured with Shop MMO Mini App")
-    except Exception:
-        logger.exception("Không thể đặt lại menu Telegram")
+    except Exception as exc:
+        logger.error("Không thể đặt lại menu Telegram error_type=%s", type(exc).__name__)
 
 async def handle_webapp_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_user_status(update, context): return
@@ -3791,8 +3791,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     c.executemany("INSERT INTO spotify_cookies (json_data, email, country, plan_type) VALUES (?, ?, ?, ?)", valid_spotify_to_insert)
                     conn.commit()
                     conn.close()
-                except Exception as e:
-                    logger.error(f"Spotify Batch Insert Error: {e}")
+                except Exception as exc:
+                    logger.error("Spotify batch insert failed error_type=%s", type(exc).__name__)
 
             active_tasks.pop(chat_id, None)
 
@@ -3857,8 +3857,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     c.executemany("INSERT INTO premium_cookies (data) VALUES (?)", fast_data_to_insert)
                     conn.commit()
                     conn.close()
-                except Exception as e:
-                    logger.error(f"Fast Insert Error: {e}")
+                except Exception as exc:
+                    logger.error("Fast insert failed error_type=%s", type(exc).__name__)
 
             await status_msg.edit_text(f"✅ *NẠP NHANH THÀNH CÔNG*\n\n📦 Đã nạp *{total_len}* cookie trực tiếp vào kho VIP!", parse_mode='Markdown', reply_markup=kb_admin())
             context.user_data['awaiting'] = None
@@ -3940,8 +3940,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         c.executemany("INSERT INTO free_cookies (data) VALUES (?)", [(ck,) for ck in valid_cookies_to_insert])
                     conn.commit()
                     conn.close()
-                except Exception as e:
-                    logger.error(f"Batch Insert Error: {e}")
+                except Exception as exc:
+                    logger.error("Batch insert failed error_type=%s", type(exc).__name__)
 
             active_tasks.pop(chat_id, None)
 
@@ -3978,8 +3978,8 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except asyncio.TimeoutError:
                     success, token, error, account = False, None, 'Hết thời gian kiểm tra', {}
-                except Exception as e:
-                    success, token, error, account = False, None, str(e), {}
+                except Exception as exc:
+                    success, token, error, account = False, None, f"Lỗi xử lý ({type(exc).__name__})", {}
 
                 if success and token and account.get('membership_status') == 'CURRENT_MEMBER':
                     results.append({'cookies': cookie_dict, 'token': token, 'link': checker.format_nftoken_link(token), 'account': account})
@@ -4026,20 +4026,20 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else: await context.bot.send_message(chat_id=update.effective_chat.id, text=f"❌ Không có cookie nào hoạt động.\n\n  {FOOTER}", parse_mode='Markdown')
         await context.bot.send_message(chat_id=update.effective_chat.id, text="⬇️", reply_markup=kb_done())
 
-    except Exception as e:
-        logger.error(f"Batch error: {e}")
-        await status_msg.edit_text(f"❌ *Lỗi xử lý file*\n\n  `{str(e)[:80]}`\n\n  {FOOTER}", parse_mode='Markdown')
+    except Exception as exc:
+        logger.error("Batch processing failed error_type=%s", type(exc).__name__)
+        await status_msg.edit_text(f"❌ *Lỗi xử lý file*\n\nVui lòng thử lại hoặc liên hệ hỗ trợ.\n\n  {FOOTER}", parse_mode='Markdown')
         active_tasks.pop(chat_id, None)
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id if update and update.effective_user else None
     chat_id = update.effective_chat.id if update and update.effective_chat else None
     logger.error(
-        "Unhandled Telegram update error user_id=%s chat_id=%s update_id=%s",
+        "Unhandled Telegram update error user_id=%s chat_id=%s update_id=%s error_type=%s",
         user_id,
         chat_id,
         getattr(update, 'update_id', None),
-        exc_info=(type(context.error), context.error, context.error.__traceback__),
+        type(context.error).__name__ if context.error else "UnknownError",
     )
 
 def main():
@@ -4060,16 +4060,6 @@ def main():
     )
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("me", cmd_me))
-    application.add_handler(CommandHandler("giftcode", cmd_giftcode))
-    application.add_handler(CommandHandler("freecookie", cmd_freecookie))
-    application.add_handler(CommandHandler("baoloi", cmd_baoloi))
-
-    application.add_handler(CommandHandler("admin", cmd_admin))
-    application.add_handler(CommandHandler("setplan", cmd_setplan))
-    application.add_handler(CommandHandler("addplan", cmd_addplan))
-    application.add_handler(CommandHandler("addcookie", cmd_addcookie))
-    application.add_handler(CommandHandler("broadcast", cmd_broadcast))
 
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, handle_message))
