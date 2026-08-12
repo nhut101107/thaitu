@@ -358,7 +358,11 @@ function openWarranty(deliveryId) {
 export async function openDevices() {
   try {
     const result = await api.devices();
-    modal(`<div class="eyebrow">BẢO MẬT TÀI KHOẢN</div><h2>Thiết bị đăng nhập</h2><p>Tối đa ${result.limit} thiết bị.</p>${result.items.map((item) => `<article class="device-card"><div><b>${escapeHtml(item.label)}</b><small>${escapeHtml(item.platform || "Web")} · ${escapeHtml(item.lastSeenAt)}</small></div>${item.current ? "<em>Thiết bị này</em>" : item.revoked ? "<em>Đã thu hồi</em>" : `<button data-revoke-device="${item.id}">Thu hồi</button>`}</article>`).join("")}`, {onOpen(root, close) { root.querySelectorAll("[data-revoke-device]").forEach((button) => button.onclick = async () => { try { await api.revokeDevice(button.dataset.revokeDevice); close(); openDevices(); } catch (error) { toast(error.message, "error"); } }); }});
+    const isAdmin = Boolean(state.bootstrap?.isAdmin);
+    modal(`<div class="eyebrow">BẢO MẬT TÀI KHOẢN</div><h2>Thiết bị đăng nhập</h2><p>Tối đa ${result.limit} thiết bị.</p>${result.items.map((item) => `<article class="device-card"><div><b>${escapeHtml(item.label)}</b><small>${escapeHtml(item.platform || "Web")} · ${escapeHtml(item.lastSeenAt)}</small></div>${item.current ? "<em>Thiết bị này</em>" : item.revoked ? (isAdmin ? `<button data-restore-device="${item.id}">Mở lại</button>` : "<em>Đã thu hồi</em>") : `<button data-revoke-device="${item.id}">Thu hồi</button>`}</article>`).join("")}`, {onOpen(root, close) {
+      root.querySelectorAll("[data-revoke-device]").forEach((button) => button.onclick = async () => { try { await api.revokeDevice(button.dataset.revokeDevice); close(); openDevices(); } catch (error) { toast(error.message, "error"); } });
+      root.querySelectorAll("[data-restore-device]").forEach((button) => button.onclick = async () => { const old = button.textContent; button.disabled = true; button.textContent = "Đang mở..."; try { await api.adminRestoreDevice(button.dataset.restoreDevice); close(); openDevices(); toast("Đã mở lại thiết bị"); } catch (error) { button.disabled = false; button.textContent = old; toast(error.message, "error"); } });
+    }});
   } catch (error) { toast(error.message, "error"); }
 }
 

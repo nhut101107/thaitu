@@ -1623,7 +1623,6 @@ def run_tv_login(cookie_data, tv_code):
 
 def legacy_public_account(account):
     return {
-        "name": account.get("account_name", "Netflix không cung cấp"),
         "email": account.get("email_masked", "Netflix không cung cấp"),
         "plan": account.get("plan", "Netflix không cung cấp"),
         "country": account.get("country", "Netflix không cung cấp"),
@@ -1674,7 +1673,6 @@ def public_account(account):
 
     profiles = account.get("profiles") or []
     details = [
-        ("Tên tài khoản", value("account_name")),
         ("Email", value("email_masked")),
         ("Số điện thoại", value("phone")),
         ("Quốc gia", value("country")),
@@ -1700,7 +1698,6 @@ def public_account(account):
         for label, item in details
         if is_available(item)
     ]
-    name = value("account_name")
     email = value("email_masked")
     plan = value("plan")
     country = value("country")
@@ -1708,7 +1705,6 @@ def public_account(account):
     quality = value("video_quality")
     profile_value = value("profile_count", str(len(profiles)))
     return {
-        "name": name if is_available(name) else "",
         "email": email if is_available(email) else "",
         "plan": plan if is_available(plan) else "",
         "country": country if is_available(country) else "",
@@ -2574,6 +2570,32 @@ def revoke_device(device_id):
     connection.execute("UPDATE user_devices SET revoked=1 WHERE id=?", (device_id,))
     connection.commit()
     return jsonify({"ok": True})
+
+
+@app.post("/api/admin/devices/<int:device_id>/restore")
+@admin_required
+def admin_restore_device(device_id):
+    connection = db()
+    connection.execute("BEGIN IMMEDIATE")
+    device = connection.execute(
+        "SELECT id,user_id,revoked FROM user_devices WHERE id=?",
+        (device_id,),
+    ).fetchone()
+    if not device:
+        connection.rollback()
+        return jsonify({"ok": False, "reason_code": "device_not_found", "error": "Không tìm thấy thiết bị"}), 404
+    updated = connection.execute(
+        "UPDATE user_devices SET revoked=0 WHERE id=? AND revoked=1",
+        (device_id,),
+    )
+    admin_audit(
+        connection,
+        "device.restore",
+        device_id,
+        f"user_id={int(device['user_id'])},changed={int(updated.rowcount == 1)}",
+    )
+    connection.commit()
+    return jsonify({"ok": True, "restored": bool(updated.rowcount == 1), "alreadyActive": not bool(device["revoked"])})
 
 
 def grant_warranty_credit(connection, delivery):
@@ -3656,6 +3678,12 @@ def admin_dashboard():
            ORDER BY risk_score DESC,last_event DESC LIMIT 50""",
         ((datetime.now(LOCAL_TZ) - timedelta(days=30)).replace(tzinfo=None).isoformat(timespec="seconds"),),
     ).fetchall()
+    devices = connection.execute(
+        """SELECT d.id,d.user_id,u.username,d.label,d.platform,d.first_seen_at,
+                  d.last_seen_at,d.revoked
+           FROM user_devices d LEFT JOIN users u ON u.user_id=d.user_id
+           ORDER BY d.revoked,d.last_seen_at DESC LIMIT 200"""
+    ).fetchall()
     provider_metrics = connection.execute(
         "SELECT status,COUNT(*) AS count,COALESCE(AVG(latency_ms),0) AS avg_ms FROM provider_attempts GROUP BY status"
     ).fetchall()
@@ -3709,6 +3737,7 @@ def admin_dashboard():
         "tickets": [dict(row) for row in tickets],
         "warranties": [dict(row) for row in warranties],
         "riskUsers": [dict(row) for row in risk_users],
+        "devices": [dict(row) for row in devices],
         "metrics": {
             "revenue": revenue_periods,
             "providers": [dict(row) for row in provider_metrics],

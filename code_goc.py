@@ -825,7 +825,6 @@ def format_account_card(account: dict, link: str, index: int = 0) -> str:
             return ', '.join(items) if items else 'N/A'
         return 'N/A'
 
-    account_name = escape_telegram_markdown(repair_mojibake(normalize_display(account.get('account_name', 'N/A'))))
     email_masked = normalize_display(account.get('email_masked', 'N/A'))
     phone = normalize_display(account.get('phone', 'N/A'))
     country = normalize_display(account.get('country', 'N/A'))
@@ -875,7 +874,6 @@ def format_account_card(account: dict, link: str, index: int = 0) -> str:
     if last4 == 'N/A':
         if payment_method != 'N/A' and payment_method.lower() in non_card_types: last4 = 'Không có'
         else: last4 = 'Ẩn'
-    if account_name == 'N/A': account_name = 'Netflix không cung cấp'
     if email_masked == 'N/A': email_masked = 'Netflix không cung cấp'
 
     profiles_str = ', '.join(profiles) if profiles else 'Không có'
@@ -891,7 +889,6 @@ def format_account_card(account: dict, link: str, index: int = 0) -> str:
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"THÔNG TIN TÀI KHOẢN\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"├ Tên: {account_name}\n"
         f"├ Email: `{email_masked}`\n"
         f"├ Số điện thoại: `{phone}`\n"
         f"├ Quốc gia: {country_display}\n"

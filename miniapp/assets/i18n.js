@@ -88,7 +88,7 @@ const EXACT_EN = new Map([
   ["Gửi đến Admin", "Send to Admin"], ["Hướng dẫn sử dụng", "How to use"], ["NFToken theo gói", "Plan NFToken"],
   ["Đăng nhập TV", "TV login"], ["Netflix không cung cấp", "Not provided by Netflix"],
   ["Thông tin", "Information"], ["Gói", "Plan"], ["Quốc gia", "Country"],
-  ["Tên tài khoản", "Account name"], ["Số điện thoại", "Phone number"], ["Tiền tệ", "Currency"],
+  ["Số điện thoại", "Phone number"], ["Tiền tệ", "Currency"],
   ["Giá gói", "Plan price"], ["Ngày tham gia", "Member since"], ["Kỳ thanh toán tiếp theo", "Next billing date"],
   ["Phương thức thanh toán", "Payment method"], ["Loại thẻ", "Card type"], ["4 số cuối", "Last 4 digits"],
   ["Tạm giữ thanh toán", "Payment hold"], ["Chất lượng video", "Video quality"], ["Số lượng tối đa", "Maximum streams"],

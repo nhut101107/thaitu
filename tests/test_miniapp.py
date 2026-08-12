@@ -200,6 +200,8 @@ class MiniAppTest(unittest.TestCase):
         self.assertIn('beforeinstallprompt', Path("miniapp/assets/app.js").read_text(encoding="utf-8"))
         self.assertIn('shop-mmo-static-v7', Path("miniapp/sw.js").read_text(encoding="utf-8"))
         self.assertIn('trial_nftoken_enabled', Path("miniapp/assets/admin.js").read_text(encoding="utf-8"))
+        self.assertIn("data-restore-device", views_source)
+        self.assertIn("adminRestoreDevice", api_source)
         self.assertNotIn('id="tool-quantity"', views_source)
         i18n_source = Path("miniapp/assets/i18n.js").read_text(encoding="utf-8")
         self.assertIn('[placeholder],[aria-label],[title]', i18n_source)
@@ -1043,13 +1045,14 @@ class MiniAppTest(unittest.TestCase):
         self.assertEqual(response.json["runtime_version"], miniapp_server.TV_LOGIN_RUNTIME_VERSION)
         self.assertEqual(len(response.json["source_fingerprint"]), 20)
 
-    def test_account_name_repairs_encoding_and_markdown_special_chars(self):
+    def test_account_name_is_not_exposed_in_get_info(self):
         account = {"account_name": "NguyÃªn_VÄƒn[*]", "email_masked": "n***@mail.com"}
         public = miniapp_server.public_account(account)
-        self.assertEqual(public["name"], "Nguyên_Văn[*]")
+        self.assertNotIn("name", public)
+        self.assertNotIn("Tên tài khoản", [item["label"] for item in public["details"]])
         from code_goc import format_account_card
         card = format_account_card(account, "https://example.invalid")
-        self.assertIn("Nguyên\\_Văn\\[", card)
+        self.assertNotIn("Tên:", card)
         self.assertNotIn("NguyÃªn", card)
         self.assertNotIn("Nếu có lỗi xảy ra", card)
 

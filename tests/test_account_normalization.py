@@ -69,6 +69,8 @@ class AccountNormalizationTest(unittest.TestCase):
             "plan": "N/A",
         })
         public = public_account(account)
+        self.assertNotIn("name", public)
+        self.assertNotIn("Tên tài khoản", [item["label"] for item in public["details"]])
         values = [item["value"] for item in public["details"]]
         self.assertNotIn("Không rõ", values)
         self.assertNotIn("Netflix không cung cấp", values)
@@ -175,6 +177,8 @@ class AccountNormalizationTest(unittest.TestCase):
         self.assertEqual(account["plan"], "Premium")
         self.assertEqual(account["max_streams"], "4")
         public = public_account(account)
+        self.assertNotIn("name", public)
+        self.assertNotIn("Tên tài khoản", [item["label"] for item in public["details"]])
         values = [item["value"] for item in public["details"]]
         self.assertNotIn("Không rõ", values)
         self.assertEqual(public["status"], "Đang hoạt động")

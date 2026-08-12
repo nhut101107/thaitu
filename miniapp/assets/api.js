@@ -99,6 +99,7 @@ export const api = {
   warranty: (deliveryId, reason, idempotencyKey) => request("/api/warranty", {method: "POST", body: JSON.stringify({deliveryId, reason, idempotencyKey})}),
   devices: () => request("/api/devices"),
   revokeDevice: (id) => request(`/api/devices/${id}`, {method: "DELETE", body: "{}"}),
+  adminRestoreDevice: (id) => request(`/api/admin/devices/${id}/restore`, {method: "POST", body: "{}"}),
   referral: () => request("/api/referral"),
   checkin: () => request("/api/checkin", {method: "POST", body: "{}"}),
   checkinHistory: () => request("/api/checkin/history"),
