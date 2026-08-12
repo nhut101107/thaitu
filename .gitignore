@@ -6,5 +6,13 @@ tokenbot.txt
 bot_database.db
 bot_database.db-shm
 bot_database.db-wal
+bot_database.db.migration*.bak
 logs/
+backups/
+uploads/
+tools/
+/Cookie
+/Cookie/
+se-metadata.json
+/--
 *.log
