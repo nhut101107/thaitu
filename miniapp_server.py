@@ -1901,7 +1901,10 @@ def calculate_promo(connection, user_id, code, items):
     original = sum(int(item["lineTotal"]) for item in items)
     if not code:
         return {"code": "", "percent": 0, "original": original, "discount": 0, "final": original}
-    row = connection.execute("SELECT * FROM discount_codes WHERE code=?", (code,)).fetchone()
+    row = connection.execute(
+        "SELECT * FROM discount_codes WHERE UPPER(code)=? ORDER BY rowid DESC LIMIT 1",
+        (code,),
+    ).fetchone()
     if not row or str(row["code_type"] or "BALANCE").upper() != "PERCENT":
         raise ToolError("Mã giảm giá không hợp lệ", 400)
     percent = int(row["percent"] or 0)
@@ -3965,6 +3968,18 @@ def admin_save_code(code):
         return jsonify({"ok": False, "error": "Mã quà tặng không hợp lệ"}), 400
     if code_type not in {"BALANCE", "PERCENT"} or not 0 <= percent <= 100 or min_order_total < 0:
         return jsonify({"ok": False, "error": "Mã khuyến mãi không hợp lệ"}), 400
+    if code_type == "PERCENT" and not 1 <= percent <= 100:
+        return jsonify({"ok": False, "error": "Phần trăm giảm phải từ 1 đến 100"}), 400
+    parsed_starts = parsed_ends = None
+    try:
+        if starts_at:
+            parsed_starts = datetime.fromisoformat(starts_at)
+        if ends_at:
+            parsed_ends = datetime.fromisoformat(ends_at)
+    except ValueError:
+        return jsonify({"ok": False, "error": "Thời gian mã không hợp lệ"}), 400
+    if parsed_starts and parsed_ends and parsed_starts >= parsed_ends:
+        return jsonify({"ok": False, "error": "Thời gian bắt đầu phải trước kết thúc"}), 400
     connection = db()
     connection.execute(
         """INSERT INTO discount_codes(code,amount,uses,code_type,percent,per_user,starts_at,ends_at,min_order_total,product_ids)

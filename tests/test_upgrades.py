@@ -67,6 +67,35 @@ class UpgradeTest(unittest.TestCase):
         duplicate = self.client.post("/api/checkout", json={"idempotencyKey": "promo_key_123456", "promoCode": "SAVE"}, headers=self.headers)
         self.assertTrue(duplicate.json["duplicate"])
 
+    def test_admin_can_create_percent_promo_for_checkout(self):
+        created = self.client.put(
+            "/api/admin/codes/SPRING25",
+            json={
+                "amount": 0,
+                "uses": 2,
+                "codeType": "PERCENT",
+                "percent": 25,
+                "perUser": True,
+                "minOrderTotal": 5000,
+            },
+            headers=self.headers,
+        )
+        self.assertEqual(created.status_code, 200)
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        row = connection.execute(
+            "SELECT code_type,percent,uses,min_order_total FROM discount_codes WHERE code='SPRING25'"
+        ).fetchone()
+        connection.close()
+        self.assertEqual(row, ("PERCENT", 25, 2, 5000))
+        self.assertEqual(self.client.put("/api/cart/1", json={"quantity": 2}, headers=self.headers).status_code, 200)
+        checkout = self.client.post(
+            "/api/checkout",
+            json={"idempotencyKey": "admin-promo-key-123456", "promoCode": "spring25"},
+            headers=self.headers,
+        )
+        self.assertEqual(checkout.status_code, 200)
+        self.assertEqual(checkout.json["discountAmount"], 5000)
+
     def test_provider_error_does_not_charge_and_mock_is_idempotent(self):
         connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
         connection.execute("INSERT INTO product_providers(name,base_url,api_key,timeout,enabled,created_at,updated_at) VALUES('Mock','https://provider.invalid','secret',10,1,'','')")

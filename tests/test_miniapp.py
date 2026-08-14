@@ -198,6 +198,8 @@ class MiniAppTest(unittest.TestCase):
         self.assertIn('api.js?v=19', Path("miniapp/assets/app.js").read_text(encoding="utf-8"))
         self.assertIn('scheduleRender', Path("miniapp/assets/app.js").read_text(encoding="utf-8"))
         self.assertIn('beforeinstallprompt', Path("miniapp/assets/app.js").read_text(encoding="utf-8"))
+        self.assertIn('codeType', Path("miniapp/assets/admin.js").read_text(encoding="utf-8"))
+        self.assertIn('minOrderTotal', Path("miniapp/assets/admin.js").read_text(encoding="utf-8"))
         self.assertIn('shop-mmo-static-v8', Path("miniapp/sw.js").read_text(encoding="utf-8"))
         self.assertIn('theme.css?v=3', Path("miniapp/index.html").read_text(encoding="utf-8"))
         theme_source = Path("miniapp/assets/theme.css").read_text(encoding="utf-8")
