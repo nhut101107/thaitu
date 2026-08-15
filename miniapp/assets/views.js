@@ -163,22 +163,37 @@ export function openNftoken(mode = "plan") {
     ? `Bạn còn ${trialRemaining} lượt trải nghiệm hôm nay. Lượt trải nghiệm được dùng trước.`
     : vip ? "Chỉ trừ lượt Cookie VIP đã mua khi tạo thành công." : "Sử dụng lượt đã mua hoặc hạn mức của gói hiện tại.";
   modal(`<div class="confirm-icon">${vip ? "🍪" : "⚡"}</div><h2>${vip ? "Rút Cookie VIP" : "Tạo NFToken"}</h2><p>${usageText}</p><button class="button wide" data-run-nftoken>Bắt đầu xử lý</button><button class="button secondary wide hidden" data-cancel-nftoken>Hủy job đang chờ</button><small data-job-state></small>`, {onOpen(root, close) {
+    let requestId = "";
     let cancelled = false;
-    root.querySelector("[data-cancel-nftoken]").onclick = async () => { try { await api.cancelNftokenJob(requestId); cancelled = true; close(); toast("Đã hủy job đang chờ"); } catch (error) { toast(error.message, "error"); } };
-    root.querySelector("[data-run-nftoken]").onclick = async (event) => {
+    const modalSheet = root.querySelector(".modal-sheet");
+    const makeRequestId = () => globalThis.crypto?.randomUUID?.() || `nftoken-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const runButton = root.querySelector("[data-run-nftoken]");
+    const cancelButton = root.querySelector("[data-cancel-nftoken]");
+    const stateLabel = root.querySelector("[data-job-state]");
+    cancelButton.onclick = async () => {
+      if (!requestId) return;
+      try { await api.cancelNftokenJob(requestId); cancelled = true; close(); toast("Đã hủy job đang chờ"); }
+      catch (error) { toast(error.message, "error"); }
+    };
+    runButton.onclick = async (event) => {
+      requestId = makeRequestId();
+      cancelled = false;
+      stateLabel.textContent = "";
+      stateLabel.classList.remove("error");
+      cancelButton.classList.add("hidden");
       const done = busyButton(event.currentTarget); const quantity = 1;
       let failed = false;
       try {
         let result = await api.nftoken(mode, quantity, requestId, true);
         if (["queued", "running"].includes(result.status)) {
-          root.querySelector("[data-cancel-nftoken]").classList.remove("hidden");
+          cancelButton.classList.remove("hidden");
           const deadline = Date.now() + 95000;
-          while (!cancelled && root.isConnected && ["queued", "running"].includes(result.status) && Date.now() < deadline) {
-            root.querySelector("[data-job-state]").textContent = result.status === "queued" ? "Đang chờ máy chủ xử lý..." : "Đang kiểm tra Cookie...";
+          while (!cancelled && modalSheet?.isConnected && ["queued", "running"].includes(result.status) && Date.now() < deadline) {
+            stateLabel.textContent = result.status === "queued" ? "Đang chờ máy chủ xử lý..." : "Đang kiểm tra Cookie...";
             await new Promise((resolve) => setTimeout(resolve, 1200));
             result = await api.nftokenJob(requestId);
           }
-          if (cancelled || !root.isConnected) return;
+          if (cancelled || !modalSheet?.isConnected) return;
           if (["queued", "running"].includes(result.status)) throw Object.assign(new Error("Máy chủ xử lý quá lâu, kết quả vẫn được lưu trong lịch sử giao hàng"), {reasonCode:"nftoken_timeout"});
         }
         syncQuota(result.quota); close();
@@ -187,7 +202,12 @@ export function openNftoken(mode = "plan") {
         failed = true;
         const message = error.reasonCode === "nftoken_timeout"
           ? "Máy chủ xử lý quá lâu, vui lòng thử lại"
-          : error.message;
+          : error.message || "Không tạo được NFToken lúc này";
+        if (stateLabel && modalSheet?.isConnected) {
+          stateLabel.textContent = message;
+          stateLabel.classList.add("error");
+          cancelButton.classList.add("hidden");
+        }
         toast(message, "error");
       } finally {
         done();

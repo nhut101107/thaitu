@@ -1,7 +1,7 @@
 import {api} from "./api.js?v=19";
 import {state, subscribe, update} from "./state.js";
 import {bottomNav, header, toast} from "./components.js?v=19";
-import {accountView, addToCart, claimFreeCookie, homeView, openCart, openCheckin, openDeliveries, openDeposit, openDevices, openGiftcode, openHelp, openMissions, openNftoken, openNotifications, openOrder, openProduct, openReferral, openSupport, openTvLogin, ordersView, storeView, toolsView} from "./views.js?v=19";
+import {accountView, addToCart, claimFreeCookie, homeView, openCart, openCheckin, openDeliveries, openDeposit, openDevices, openGiftcode, openHelp, openMissions, openNftoken, openNotifications, openOrder, openProduct, openReferral, openSupport, openTvLogin, ordersView, storeView, toolsView} from "./views.js?v=20";
 import {adminView, bindAdminEvents, loadAdmin} from "./admin.js?v=19";
 import {translateDom, translateText} from "./i18n.js?v=3";
 

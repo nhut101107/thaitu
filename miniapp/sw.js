@@ -1,4 +1,4 @@
-const CACHE_VERSION = "shop-mmo-static-v8";
+const CACHE_VERSION = "shop-mmo-static-v9";
 const STATIC_ASSETS = [
   "/",
   "/manifest.json",
@@ -6,12 +6,12 @@ const STATIC_ASSETS = [
   "/assets/modern.css?v=2",
   "/assets/tools.css?v=4",
   "/assets/theme.css?v=3",
-  "/assets/app.js?v=19",
+  "/assets/app.js?v=20",
   "/assets/api.js?v=19",
   "/assets/state.js",
   "/assets/i18n.js?v=3",
   "/assets/components.js?v=19",
-  "/assets/views.js?v=19",
+  "/assets/views.js?v=20",
   "/assets/admin.js?v=19",
 ];
 

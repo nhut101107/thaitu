@@ -96,6 +96,46 @@ class UpgradeTest(unittest.TestCase):
         self.assertEqual(checkout.status_code, 200)
         self.assertEqual(checkout.json["discountAmount"], 5000)
 
+    def test_interrupted_nftoken_job_is_recovered_and_refunded(self):
+        connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
+        connection.row_factory = sqlite3.Row
+        connection.execute("UPDATE users SET nftoken_credits=0 WHERE user_id=1")
+        connection.execute("INSERT INTO premium_cookies(data,is_used) VALUES('safe-cookie',1)")
+        cookie_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+        connection.execute(
+            """INSERT INTO nftoken_jobs(
+                request_id,user_id,mode,quantity,status,result_json,reason_code,message,status_code,
+                quota_kind,quota_date,reserved_cookie_id,reserved_cookie_source,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "interrupted-job-123",
+                1,
+                "plan",
+                1,
+                "running",
+                "{}",
+                "",
+                "",
+                409,
+                "paid_nftoken",
+                miniapp_server.local_today(),
+                cookie_id,
+                "premium",
+                miniapp_server.now_iso(),
+                miniapp_server.now_iso(),
+            ),
+        )
+        connection.commit()
+        self.assertEqual(miniapp_server.recover_stale_nftoken_jobs(connection, force=True), 1)
+        job = connection.execute(
+            "SELECT status,reason_code,status_code FROM nftoken_jobs WHERE request_id='interrupted-job-123'"
+        ).fetchone()
+        self.assertEqual(tuple(job), ("error", "nftoken_interrupted", 503))
+        self.assertEqual(connection.execute("SELECT nftoken_credits FROM users WHERE user_id=1").fetchone()[0], 1)
+        cookie = connection.execute("SELECT is_used,health_status FROM premium_cookies WHERE id=?", (cookie_id,)).fetchone()
+        self.assertEqual(tuple(cookie), (0, "quarantined"))
+        connection.close()
+
     def test_provider_error_does_not_charge_and_mock_is_idempotent(self):
         connection = sqlite3.connect(miniapp_server.DATABASE_PATH)
         connection.execute("INSERT INTO product_providers(name,base_url,api_key,timeout,enabled,created_at,updated_at) VALUES('Mock','https://provider.invalid','secret',10,1,'','')")

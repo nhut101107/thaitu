@@ -320,3 +320,13 @@ body::after { right: -150px; bottom: 18%; background: #18181b; animation-delay: 
   border-right-color: #f4f4f5 !important;
   border-bottom-color: #f4f4f5 !important;
 }
+.modal-sheet [data-job-state].error {
+  display: block;
+  margin-top: 14px;
+  padding: 11px 12px;
+  border: 1px solid #5b2528;
+  border-radius: 13px;
+  background: #2b1719;
+  color: #fca5a5 !important;
+  line-height: 1.4;
+}

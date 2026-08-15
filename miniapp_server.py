@@ -87,6 +87,7 @@ try:
 except (TypeError, ValueError):
     COOKIE_CHECK_TIMEOUT = 30
 NFTOKEN_TOTAL_TIMEOUT = 90
+NFTOKEN_JOB_STALE_TIMEOUT = NFTOKEN_TOTAL_TIMEOUT + 30
 try:
     TRIAL_NFTOKEN_FREE_COOKIE_PERCENT = max(
         51, min(int(os.getenv("TRIAL_NFTOKEN_FREE_COOKIE_PERCENT", "70")), 99)
@@ -479,6 +480,10 @@ def migrate():
             reason_code TEXT NOT NULL DEFAULT '',
             message TEXT NOT NULL DEFAULT '',
             status_code INTEGER NOT NULL DEFAULT 409,
+            quota_kind TEXT NOT NULL DEFAULT '',
+            quota_date TEXT NOT NULL DEFAULT '',
+            reserved_cookie_id INTEGER,
+            reserved_cookie_source TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
@@ -861,8 +866,15 @@ def migrate():
             connection.execute(f"ALTER TABLE miniapp_checkouts ADD COLUMN {name} {definition}")
 
     nftoken_job_columns = column_names(connection, "nftoken_jobs")
-    if "status_code" not in nftoken_job_columns:
-        connection.execute("ALTER TABLE nftoken_jobs ADD COLUMN status_code INTEGER NOT NULL DEFAULT 409")
+    for name, definition in {
+        "status_code": "INTEGER NOT NULL DEFAULT 409",
+        "quota_kind": "TEXT NOT NULL DEFAULT ''",
+        "quota_date": "TEXT NOT NULL DEFAULT ''",
+        "reserved_cookie_id": "INTEGER",
+        "reserved_cookie_source": "TEXT NOT NULL DEFAULT ''",
+    }.items():
+        if name not in nftoken_job_columns:
+            connection.execute(f"ALTER TABLE nftoken_jobs ADD COLUMN {name} {definition}")
     connection.commit()
     connection.close()
 
@@ -880,6 +892,7 @@ def ensure_migrated():
             backup_path = backup_database_for_migration() if had_database else None
             try:
                 migrate()
+                recover_stale_nftoken_jobs(db())
             except Exception:
                 if backup_path:
                     restore_database_backup(backup_path)
@@ -1385,6 +1398,25 @@ class ToolError(Exception):
 COOKIE_TABLES = {"premium": "premium_cookies", "free": "free_cookies"}
 
 
+def set_nftoken_job_reservation(connection, request_id, cookie_id, cookie_source, quota_source):
+    if not request_id:
+        return
+    quota = quota_source if isinstance(quota_source, dict) else {}
+    connection.execute(
+        """UPDATE nftoken_jobs
+           SET quota_kind=?,quota_date=?,reserved_cookie_id=?,reserved_cookie_source=?,updated_at=?
+           WHERE request_id=? AND status IN ('queued','running')""",
+        (
+            str(quota.get("kind") or "")[:30],
+            str(quota.get("date") or "")[:20],
+            int(cookie_id) if cookie_id is not None else None,
+            str(cookie_source or "")[:20],
+            now_iso(),
+            request_id,
+        ),
+    )
+
+
 def nftoken_cookie_order(allow_free=False):
     if not allow_free:
         return ("premium",)
@@ -1436,17 +1468,18 @@ def reserve_cookie(connection, user_id=None):
     return reserved[0], reserved[1]
 
 
-def reserve_nftoken_cookie(connection, allow_free=False, user_id=None):
+def reserve_nftoken_cookie(connection, allow_free=False, user_id=None, request_id=None, quota_source=None):
     connection.execute("BEGIN IMMEDIATE")
     reserved = reserve_cookie_row(connection, nftoken_cookie_order(allow_free), user_id=user_id)
     if not reserved:
         connection.rollback()
         raise ToolError("Kho Cookie tạo NFToken đang trống", 409, "stock_empty")
+    set_nftoken_job_reservation(connection, request_id, reserved[0], reserved[2], quota_source)
     connection.commit()
     return reserved
 
 
-def reserve_nftoken_request(connection, user_id, mode):
+def reserve_nftoken_request(connection, user_id, mode, request_id=None):
     today = local_today()
     connection.execute("BEGIN IMMEDIATE")
     trial = trial_settings(connection)
@@ -1507,6 +1540,7 @@ def reserve_nftoken_request(connection, user_id, mode):
     if not reserved:
         connection.rollback()
         raise ToolError("Kho Cookie tạo NFToken đang trống", 409, "stock_empty")
+    set_nftoken_job_reservation(connection, request_id, reserved[0], reserved[2], quota_source)
     connection.commit()
     return reserved[0], reserved[1], reserved[2], quota_source
 
@@ -2876,7 +2910,9 @@ def free_cookie():
 
 
 def generate_one_nftoken(connection, user_id, mode, deadline=None, request_id=None):
-    cookie_id, cookie_data, cookie_source, quota_source = reserve_nftoken_request(connection, user_id, mode)
+    cookie_id, cookie_data, cookie_source, quota_source = reserve_nftoken_request(
+        connection, user_id, mode, request_id=request_id
+    )
     allow_free = quota_source.get("kind") == "trial_nftoken"
     last_error = "Không tìm thấy Cookie hoạt động"
     last_reason_code = "cookie_unavailable"
@@ -2885,6 +2921,7 @@ def generate_one_nftoken(connection, user_id, mode, deadline=None, request_id=No
             inventory_outcome(connection, cookie_source, cookie_id, False, "nftoken_timeout")
             connection.commit()
             refund_nftoken_request(connection, user_id, quota_source)
+            clear_nftoken_job_reservation(connection, request_id)
             raise ToolError("Máy chủ xử lý quá lâu, vui lòng thử lại", 504, "nftoken_timeout")
         try:
             if deadline is None:
@@ -2910,6 +2947,7 @@ def generate_one_nftoken(connection, user_id, mode, deadline=None, request_id=No
                 connection, user_id, "nftoken_vip" if mode == "vip" else "nftoken",
                 cookie_source, cookie_id, request_id or "", account,
             )
+            clear_nftoken_job_reservation(connection, request_id)
             connection.commit()
             return {
                 "link": f"https://netflix.com/?nftoken={quote(str(token), safe='')}",
@@ -2923,16 +2961,22 @@ def generate_one_nftoken(connection, user_id, mode, deadline=None, request_id=No
         last_error = nftoken_failure_message(last_reason_code)
         inventory_outcome(connection, cookie_source, cookie_id, False, last_reason_code)
         connection.commit()
+        clear_nftoken_job_reservation(connection, request_id)
         if last_reason_code == "nftoken_timeout":
             break
         if attempt < 4:
             try:
                 cookie_id, cookie_data, cookie_source = reserve_nftoken_cookie(
-                    connection, allow_free=allow_free, user_id=user_id
+                    connection,
+                    allow_free=allow_free,
+                    user_id=user_id,
+                    request_id=request_id,
+                    quota_source=quota_source,
                 )
             except ToolError:
                 break
     refund_nftoken_request(connection, user_id, quota_source)
+    clear_nftoken_job_reservation(connection, request_id)
     raise ToolError(last_error, 504 if last_reason_code == "nftoken_timeout" else 409, last_reason_code)
 
 
@@ -2978,6 +3022,59 @@ def finish_nftoken_job(connection, request_id, status, payload=None, reason_code
     connection.commit()
 
 
+def clear_nftoken_job_reservation(connection, request_id):
+    connection.execute(
+        """UPDATE nftoken_jobs
+           SET quota_kind='',quota_date='',reserved_cookie_id=NULL,
+               reserved_cookie_source='',updated_at=?
+           WHERE request_id=?""",
+        (now_iso(), request_id),
+    )
+    connection.commit()
+
+
+def recover_nftoken_job_reservation(connection, row, reason_code="nftoken_interrupted"):
+    cookie_id = row["reserved_cookie_id"]
+    cookie_source = row["reserved_cookie_source"]
+    if cookie_id and cookie_source:
+        inventory_outcome(connection, cookie_source, cookie_id, False, reason_code)
+        connection.commit()
+    quota_kind = row["quota_kind"]
+    if quota_kind:
+        refund_nftoken_request(
+            connection,
+            int(row["user_id"]),
+            {"kind": quota_kind, "date": row["quota_date"] or local_today()},
+        )
+    clear_nftoken_job_reservation(connection, row["request_id"])
+
+
+def recover_stale_nftoken_jobs(connection, force=False):
+    rows = connection.execute(
+        "SELECT * FROM nftoken_jobs WHERE status IN ('queued','running')"
+    ).fetchall()
+    cutoff = datetime.now(LOCAL_TZ).replace(tzinfo=None) - timedelta(seconds=NFTOKEN_JOB_STALE_TIMEOUT)
+    recovered = 0
+    for row in rows:
+        if not force:
+            try:
+                if datetime.fromisoformat(row["updated_at"]) > cutoff:
+                    continue
+            except (TypeError, ValueError):
+                pass
+        recover_nftoken_job_reservation(connection, row)
+        finish_nftoken_job(
+            connection,
+            row["request_id"],
+            "error",
+            reason_code="nftoken_interrupted",
+            message="Yêu cầu NFToken bị gián đoạn, lượt đã được hoàn lại",
+            status_code=503,
+        )
+        recovered += 1
+    return recovered
+
+
 def run_nftoken_background_job(request_id, user_id, mode, quantity):
     connection = sqlite3.connect(DATABASE_PATH, timeout=30)
     connection.row_factory = sqlite3.Row
@@ -3004,9 +3101,15 @@ def run_nftoken_background_job(request_id, user_id, mode, quantity):
         # A result already delivered upstream wins over a late cancel request.
         finish_nftoken_job(connection, request_id, "done", payload=payload, status_code=200)
     except ToolError as error:
+        row = connection.execute("SELECT * FROM nftoken_jobs WHERE request_id=?", (request_id,)).fetchone()
+        if row and (row["quota_kind"] or row["reserved_cookie_id"]):
+            recover_nftoken_job_reservation(connection, row, error.reason_code)
         finish_nftoken_job(connection, request_id, "error", reason_code=error.reason_code, message=str(error), status_code=error.status)
     except Exception as error:
         app.logger.error("NFToken background job failed request_id=%s type=%s", request_id, type(error).__name__)
+        row = connection.execute("SELECT * FROM nftoken_jobs WHERE request_id=?", (request_id,)).fetchone()
+        if row and (row["quota_kind"] or row["reserved_cookie_id"]):
+            recover_nftoken_job_reservation(connection, row, "nftoken_failed")
         finish_nftoken_job(connection, request_id, "error", reason_code="nftoken_failed", message="Không tạo được NFToken lúc này", status_code=500)
     finally:
         connection.close()
@@ -3094,10 +3197,16 @@ def create_nftoken():
             )
     except ToolError as error:
         if not results:
+            row = connection.execute("SELECT * FROM nftoken_jobs WHERE request_id=?", (request_id,)).fetchone()
+            if row and (row["quota_kind"] or row["reserved_cookie_id"]):
+                recover_nftoken_job_reservation(connection, row, error.reason_code)
             finish_nftoken_job(connection, request_id, "error", reason_code=error.reason_code, message=str(error), status_code=error.status)
             return jsonify({"ok": False, "request_id": request_id, "reason_code": error.reason_code, "error": str(error)}), error.status
     except Exception as error:
         app.logger.error("NFToken request failed request_id=%s type=%s", request_id, type(error).__name__)
+        row = connection.execute("SELECT * FROM nftoken_jobs WHERE request_id=?", (request_id,)).fetchone()
+        if row and (row["quota_kind"] or row["reserved_cookie_id"]):
+            recover_nftoken_job_reservation(connection, row, "nftoken_failed")
         finish_nftoken_job(connection, request_id, "error", reason_code="nftoken_failed", message="Không tạo được NFToken lúc này", status_code=500)
         return jsonify({"ok": False, "request_id": request_id, "reason_code": "nftoken_failed", "error": "Không tạo được NFToken lúc này"}), 500
     payload = {
@@ -3118,7 +3227,9 @@ def get_nftoken_job(request_id):
         normalized_id = normalize_nftoken_request_id(request_id)
     except ToolError as error:
         return jsonify({"ok": False, "reason_code": error.reason_code, "error": str(error)}), error.status
-    row = db().execute(
+    connection = db()
+    recover_stale_nftoken_jobs(connection)
+    row = connection.execute(
         "SELECT * FROM nftoken_jobs WHERE request_id=? AND user_id=?",
         (normalized_id, int(g.telegram_user["id"])),
     ).fetchone()
@@ -5027,6 +5138,12 @@ def not_found(_error):
 
 if __name__ == "__main__":
     migrate()
+    startup_connection = sqlite3.connect(DATABASE_PATH, timeout=30)
+    startup_connection.row_factory = sqlite3.Row
+    try:
+        recover_stale_nftoken_jobs(startup_connection, force=True)
+    finally:
+        startup_connection.close()
     host = os.getenv("MINIAPP_HOST", "127.0.0.1")
     port = int(os.getenv("MINIAPP_PORT", "8080"))
     if os.getenv("APP_ENV") == "development":
