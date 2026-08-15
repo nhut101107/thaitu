@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+  <meta name="theme-color" content="#070707">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="application-name" content="Shop MMO">
+  <link rel="apple-touch-icon" href="/assets/icon-192.svg">
+  <link rel="manifest" href="/manifest.json">
+  <title>Shop MMO</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="stylesheet" href="/assets/modern.css?v=2">
+  <link rel="stylesheet" href="/assets/tools.css?v=4">
+  <link rel="stylesheet" href="/assets/admin.css?v=3">
+  <link rel="stylesheet" href="/assets/admin-extra.css?v=8">
+  <link rel="stylesheet" href="/assets/theme.css?v=3">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <div id="loading" class="loading-screen">
+    <div class="brand-mark">S</div>
+    <strong>Shop MMO</strong>
+    <p id="loading-message">Đang tải cửa hàng...</p>
+    <div class="loading-bar"><i></i></div>
+    <button id="retry" class="button hidden">Thử lại</button>
+  </div>
+  <div id="app" class="app hidden">
+    <header id="header"></header>
+    <main id="content"></main>
+    <nav id="bottom-nav"></nav>
+  </div>
+  <div id="modal-root"></div>
+  <div id="toast-root" aria-live="polite"></div>
+  <script type="module" src="/assets/app.js?v=20"></script>
+</body>
+</html>
