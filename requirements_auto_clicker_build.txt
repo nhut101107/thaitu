@@ -1,0 +1,2 @@
+-r requirements_auto_clicker.txt
+pyinstaller>=6.0
